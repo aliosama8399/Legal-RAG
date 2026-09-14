@@ -1,0 +1,11 @@
+stages:
+  build_corpus:
+    cmd: python -m legal_rag.ingest.build_corpus data/raw/egyptian_civil_code.pdf data/corpus/corpus.jsonl
+    deps:
+      - data/raw/egyptian_civil_code.pdf
+      - src/legal_rag/ingest
+    outs:
+      - data/corpus/corpus.jsonl
+    metrics:
+      - data/corpus/corpus_stats.json:
+          cache: false

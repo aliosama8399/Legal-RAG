@@ -1,0 +1,34 @@
+# Non-secret provider configuration.
+# Override any value with the matching environment variable in .env.
+
+storage:
+  provider: postgresql # qdrant-local, qdrant, or postgresql
+  qdrant:
+    path: storage/qdrant
+    url: ""
+    collection: law_chunks
+  postgresql:
+    # Keep credentials in .env, not in this file.
+    dsn: ""
+
+embedding:
+  name: bge-m3 # gate-arabert-v1, arabert-all-nli-triplet-matryoshka, or bge-m3
+
+mlflow:
+  tracking_uri: http://127.0.0.1:5001
+  experiment: legal-rag-embeddings
+
+llm:
+  provider: openai # openai or local
+  model: gpt-4o-mini
+  base_url: "" # point at a self-hosted OpenAI-compatible server (e.g. vLLM) to use it instead
+  temperature: 0.0
+  max_tokens: 512
+
+rag:
+  top_k: 5
+
+paths:
+  upload_dir: storage/uploads
+  pending_dir: storage/pending
+  max_upload_bytes: 52428800
