@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Raw/generated data are tracked by DVC (the .dvc pointer files ARE committed)
+data/raw/*
+!data/raw/*.dvc
+data/corpus/*
+data/processed/*
+src/data/processed/*
+storage/
+mlruns/
+storage/qdrant/
+storage/mlartifacts/
+.dvc/cache/
+
+# Env / secrets
+.env
+*.local
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.cache/
+
+# MLflow / models / artifacts
+mlruns/
+artifacts/
+models/
+*.onnx
+*.safetensors
+*.gguf
+
+# OS
+Thumbs.db
+.DS_Store

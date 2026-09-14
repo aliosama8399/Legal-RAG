@@ -1,0 +1,83 @@
+services:
+  # ---- Vector databases (both provider backends available) ----
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: legal
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  # ---- Tracking / observability ----
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.3
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root file:///mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+
+  langfuse:
+    image: ghcr.io/langfuse/langfuse:2
+    depends_on:
+      postgres:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/legal
+      NEXTAUTH_SECRET: mysecret
+      SALT: mysalt
+      NEXTAUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_SIGN_UP_DISABLED: "false"
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    ports:
+      - "9091:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  # ---- LLM serving (vLLM; GPU optional) ----
+  # Uncomment to run the generative model in an OpenAI-compatible server.
+  # Use --dtype auto and an AWQ-4bit model. CPU-only deployments may prefer
+  # the local transformers fallback in src/legal_rag/llm.
+  # vllm:
+  #   image: vllm/vllm-openai:latest
+  #   command: --model Qwen/Qwen2.5-1.5B-Instruct-AWQ --quantization awq
+  #   ports:
+  #     - "8000:8000"
+  #   ipc: host
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+
+volumes:
+  qdrant_data:
+  pg_data:
+  mlflow_data:
+  grafana_data:
