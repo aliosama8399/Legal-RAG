@@ -1,6 +1,9 @@
-class OpenAIProvider:
-    """OpenAI-compatible chat client; the same class targets self-hosted
-    OpenAI-compatible servers such as vLLM by pointing base_url at them."""
+from ..LLMInterface import LLMInterface
+
+
+class OpenAIProvider(LLMInterface):
+    """Async OpenAI-compatible chat client; the same class targets
+    self-hosted OpenAI-compatible servers such as vLLM via ``base_url``."""
 
     name = "openai"
 
@@ -12,12 +15,12 @@ class OpenAIProvider:
 
     def _ensure_client(self):
         if self._client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
-            self._client = OpenAI(api_key=self._api_key or "not-needed", base_url=self._base_url or None)
+            self._client = AsyncOpenAI(api_key=self._api_key or "not-needed", base_url=self._base_url or None)
         return self._client
 
-    def generate(
+    async def generate(
         self,
         prompt: str,
         *,
@@ -30,7 +33,7 @@ class OpenAIProvider:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=self.model_id,
             messages=messages,
             temperature=temperature,

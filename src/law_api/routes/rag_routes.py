@@ -1,12 +1,63 @@
-from fastapi import APIRouter
+import logging
+from typing import Annotated
 
-from ..controllers.rag.rag_query_controller import RagQueryController
-from ..services import RAGQueryService
+from fastapi import APIRouter, Depends, HTTPException
+
+from ..controllers.NLPController import NLPController
+from ..deps import get_nlp_controller
+from ..schemas import AskRequest, AskResponse, ChatHistoryResponse, ErrorResponse, SearchResponse
+
+logger = logging.getLogger(__name__)
+
+rag_router = APIRouter(prefix="/api/v1", tags=["rag"])
 
 
-class RagRoutes:
-    """Route module for retrieval and RAG answer workflows."""
+async def _map_errors(call):
+    try:
+        return await call()
+    except ValueError as error:
+        status_code = 404 if "not found" in str(error).lower() else 422
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("RAG request failed")
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
-    def __init__(self, rag_service: RAGQueryService) -> None:
-        self.router = APIRouter(prefix="/api/v1")
-        self.router.include_router(RagQueryController(rag_service).router)
+
+@rag_router.post(
+    "/search",
+    response_model=SearchResponse,
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+)
+async def search(
+    request: AskRequest,
+    controller: Annotated[NLPController, Depends(get_nlp_controller)],
+) -> SearchResponse:
+    """Semantic search over embedded law chunks."""
+    return await _map_errors(lambda: controller.search(request))
+
+
+@rag_router.post(
+    "/ask",
+    response_model=AskResponse,
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+)
+async def ask(
+    request: AskRequest,
+    controller: Annotated[NLPController, Depends(get_nlp_controller)],
+) -> AskResponse:
+    """Retrieval-grounded answer with article citations."""
+    return await _map_errors(lambda: controller.ask(request))
+
+
+@rag_router.get(
+    "/history",
+    response_model=ChatHistoryResponse,
+    responses={422: {"model": ErrorResponse}},
+)
+async def history(
+    controller: Annotated[NLPController, Depends(get_nlp_controller)],
+    document_id: int | None = None,
+    limit: int = 50,
+) -> ChatHistoryResponse:
+    """Recent chat history, optionally filtered by document."""
+    return await _map_errors(lambda: controller.history(document_id, limit))

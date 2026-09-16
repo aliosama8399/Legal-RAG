@@ -1,5 +1,14 @@
-class LocalTransformersProvider:
-    """Offline text generation using a local Hugging Face model."""
+import asyncio
+
+from ..LLMInterface import LLMInterface
+
+
+class LocalTransformersProvider(LLMInterface):
+    """Offline text generation using a local Hugging Face model.
+
+    The transformers pipeline is blocking CPU/GPU work, so it runs in a
+    worker thread to keep the FastAPI event loop responsive.
+    """
 
     name = "local"
 
@@ -14,14 +23,7 @@ class LocalTransformersProvider:
             self._pipeline = pipeline("text-generation", model=self.model_id)
         return self._pipeline
 
-    def generate(
-        self,
-        prompt: str,
-        *,
-        system: str | None = None,
-        temperature: float = 0.0,
-        max_tokens: int = 512,
-    ) -> str:
+    def _generate_sync(self, prompt, *, system, temperature, max_tokens) -> str:
         text_pipeline = self._ensure_pipeline()
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
         generate_kwargs = {"max_new_tokens": max_tokens, "do_sample": temperature > 0}
@@ -30,3 +32,15 @@ class LocalTransformersProvider:
         output = text_pipeline(full_prompt, **generate_kwargs)
         generated = output[0]["generated_text"]
         return generated[len(full_prompt) :].strip() if generated.startswith(full_prompt) else generated.strip()
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> str:
+        return await asyncio.to_thread(
+            self._generate_sync, prompt, system=system, temperature=temperature, max_tokens=max_tokens
+        )

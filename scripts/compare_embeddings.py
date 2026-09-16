@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from law_api.config import settings
-from law_api.providers.embeddings.model_provider import EMBEDDING_MODELS, create_embedding_provider
+from law_api.stores.embeddings.EmbeddingProviderFactory import EMBEDDING_MODELS, EmbeddingProviderFactory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHUNKS = PROJECT_ROOT / "src" / "data" / "processed" / "law_chunks.jsonl"
@@ -35,14 +35,16 @@ def prepare_chunks(pdf_path: Path) -> Path:
 
 
 def run_experiment(model_name: str, chunks: list[dict], batch_size: int) -> dict:
+    import asyncio
+
     import mlflow
 
-    provider = create_embedding_provider(model_name)
+    provider = EmbeddingProviderFactory.create(model_name)
     texts = [chunk["chunk_text"] for chunk in chunks]
     started = time.perf_counter()
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
-        vectors.extend(provider.encode(texts[start : start + batch_size]))
+        vectors.extend(asyncio.run(provider.encode(texts[start : start + batch_size])))
     elapsed = time.perf_counter() - started
     dimension = len(vectors[0]) if vectors else 0
     mlflow.log_params(
