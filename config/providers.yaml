@@ -2,7 +2,7 @@
 # Override any value with the matching environment variable in .env.
 
 storage:
-  provider: postgresql # qdrant-local, qdrant, or postgresql
+  provider: qdrant-local # qdrant-local, qdrant, or postgresql
   qdrant:
     path: storage/qdrant
     url: ""
@@ -12,17 +12,17 @@ storage:
     dsn: ""
 
 embedding:
-  name: bge-m3 # gate-arabert-v1, arabert-all-nli-triplet-matryoshka, or bge-m3
+  name: arabert-all-nli-triplet-matryoshka # gate-arabert-v1, arabert-all-nli-triplet-matryoshka, or bge-m3
 
 mlflow:
   tracking_uri: http://127.0.0.1:5001
   experiment: legal-rag-embeddings
 
 llm:
-  provider: openai # openai or local
-  model: gpt-4o-mini
-  base_url: "" # point at a self-hosted OpenAI-compatible server (e.g. vLLM) to use it instead
-  temperature: 0.0
+  provider: ollama # openai, ollama, or local
+  model: gemma4:31b-cloud   # with ollama this MUST be an ollama model (e.g. llama3.1 — see `ollama list`)
+  base_url: "http://127.0.0.1:11434" # openai: self-hosted OpenAI-compatible server; ollama: Ollama host (default http://127.0.0.1:11434)
+  temperature: 0.5
   max_tokens: 512
 
 rag:
