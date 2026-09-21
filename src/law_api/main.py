@@ -10,6 +10,7 @@ from .stores.llm.LLMInterface import LLMInterface
 from .stores.llm.LLMProviderFactory import LLMProviderFactory
 from .stores.vectordb.VectorDBInterface import VectorDBInterface
 from .stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
+from .tracking.langfuse_tracker import LangfuseTracker
 from .tracking.mlflow_tracker import MLflowTracker
 
 # Pre-configured instances for tests (set via create_app() before startup).
@@ -42,16 +43,23 @@ async def lifespan(app: FastAPI):
     app.state.embedder = embedder
     app.state.llm = llm
     app.state.tracker = tracker
+    langfuse_tracker = LangfuseTracker(
+        resolved_settings.langfuse_host,
+        resolved_settings.langfuse_public_key,
+        resolved_settings.langfuse_secret_key,
+    )
     app.state.ingestion_service = DocumentIngestionService(resolved_settings, storage, embedder, tracker)
     app.state.rag_service = RAGQueryService(
         storage, embedder, llm,
         resolved_settings.rag_top_k, resolved_settings.llm_temperature, resolved_settings.llm_max_tokens,
+        langfuse=langfuse_tracker,
     )
 
     yield
 
-    # Shutdown: close the storage connection and end any dangling MLflow run.
+    # Shutdown: close the storage connection and flush observability.
     await storage.disconnect()
+    langfuse_tracker.flush()
     if tracker is not None:
         try:
             import mlflow as mlflow_module

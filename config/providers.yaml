@@ -1,4 +1,4 @@
-# Non-secret provider configuration.
+﻿# Non-secret provider configuration.
 # Override any value with the matching environment variable in .env.
 
 storage:
@@ -19,9 +19,9 @@ mlflow:
   experiment: legal-rag-embeddings
 
 llm:
-  provider: ollama # openai, ollama, or local
-  model: gemma4:31b-cloud   # with ollama this MUST be an ollama model (e.g. llama3.1 — see `ollama list`)
-  base_url: "http://127.0.0.1:11434" # openai: self-hosted OpenAI-compatible server; ollama: Ollama host (default http://127.0.0.1:11434)
+  provider: ollama # openai, vllm, ollama, or local
+  model: gemma4:31b-cloud   # with ollama this MUST be an ollama model (e.g. llama3.1 â€” see `ollama list`)
+  base_url: "http://127.0.0.1:11434" # ollama: Ollama host; vllm: OpenAI-compatible endpoint (default http://127.0.0.1:8000/v1)
   temperature: 0.5
   max_tokens: 512
 
@@ -32,3 +32,4 @@ paths:
   upload_dir: storage/uploads
   pending_dir: storage/pending
   max_upload_bytes: 52428800
+

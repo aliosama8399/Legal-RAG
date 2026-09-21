@@ -105,7 +105,9 @@ class PostgreSQLProvider(VectorDBInterface):
         await self.save_embeddings(document_id, embeddings, embedding_model)
         return document_id, len(embeddings[0]) if embeddings else 0
 
-    async def save_pending_document(self, filename, source_path, articles, chunks):
+    async def save_pending_document(self, filename, source_path, articles, chunks, next_id_floor: int = 0):
+        # PostgreSQL BIGSERIAL never reuses ids; the floor kwarg exists for
+        # interface parity.
         await self._ensure_initialized()
         async with await psycopg.AsyncConnection.connect(self.dsn) as connection:
             async with connection.cursor() as cursor:
@@ -173,7 +175,7 @@ class PostgreSQLProvider(VectorDBInterface):
     async def search(self, document_id, query_vector, top_k):
         await self._ensure_initialized()
         if self._vector_dimension is None:
-            raise ValueError("No embedded documents were found")
+            raise ValueError("No embedded documents were found — you must embed the file first")
         literal = self._vector_literal(query_vector)
         async with await psycopg.AsyncConnection.connect(self.dsn) as connection:
             async with connection.cursor() as cursor:
@@ -204,7 +206,7 @@ class PostgreSQLProvider(VectorDBInterface):
                 rows = await cursor.fetchall()
         if not rows:
             message = (
-                f"Document {document_id} was not found or has no embeddings"
+                f"Document {document_id} was not found or has no embeddings — you must embed the file first"
                 if document_id is not None
                 else "No relevant chunks were found"
             )

@@ -13,6 +13,14 @@ def test_factory_creates_ollama_provider():
     assert provider._base_url == "http://127.0.0.1:11434"
 
 
+def test_factory_vllm_uses_openai_compatible_client():
+    from law_api.stores.llm.providers import OpenAIProvider
+
+    provider = LLMProviderFactory.create("vllm", "Qwen/Qwen2.5-1.5B-Instruct-AWQ")
+    assert isinstance(provider, OpenAIProvider)
+    assert provider._base_url == "http://127.0.0.1:8000/v1"
+
+
 def test_factory_rejects_unknown_provider():
     with pytest.raises(ValueError, match="LAW_API_LLM_PROVIDER"):
         LLMProviderFactory.create("nope", "x")

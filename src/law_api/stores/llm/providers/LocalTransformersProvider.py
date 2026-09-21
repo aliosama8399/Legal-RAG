@@ -44,3 +44,15 @@ class LocalTransformersProvider(LLMInterface):
         return await asyncio.to_thread(
             self._generate_sync, prompt, system=system, temperature=temperature, max_tokens=max_tokens
         )
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ):
+        # The transformers pipeline has no native async streaming; yield the
+        # whole answer as a single chunk so the /ask/stream contract holds.
+        yield await self.generate(prompt, system=system, temperature=temperature, max_tokens=max_tokens)

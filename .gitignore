@@ -13,6 +13,7 @@ data/raw/*
 !data/raw/*.dvc
 data/corpus/*
 data/processed/*
+data/eval/*
 src/data/processed/*
 storage/
 mlruns/

@@ -44,10 +44,14 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.53.0
+    # Mount the directory (not the single file): file bind mounts from WSL hit
+    # the Docker Desktop docker-desktop-bind-mounts registry bug ("not a
+    # directory"). Point --config.file at the mounted copy instead.
+    command: --config.file=/etc/prometheus/monitoring/prometheus.yml
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring:/etc/prometheus/monitoring:ro
 
   grafana:
     image: grafana/grafana:11.0.0
@@ -58,23 +62,78 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
 
-  # ---- LLM serving (vLLM; GPU optional) ----
-  # Uncomment to run the generative model in an OpenAI-compatible server.
-  # Use --dtype auto and an AWQ-4bit model. CPU-only deployments may prefer
-  # the local transformers fallback in src/legal_rag/llm.
-  # vllm:
-  #   image: vllm/vllm-openai:latest
-  #   command: --model Qwen/Qwen2.5-1.5B-Instruct-AWQ --quantization awq
-  #   ports:
-  #     - "8000:8000"
-  #   ipc: host
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: 1
-  #             capabilities: [gpu]
+  # ---- Generative models: vLLM (OpenAI-compatible, AWQ-4bit) ----
+  # Write any HF model ID in VLLM_MODEL / VLLM_JUDGE_MODEL (see .env) and
+  # vLLM serves it — it downloads the weights into the mounted cache itself.
+  # The base model serves /ask (the evaluated model); the judge model is used
+  # only by the Ragas evaluation to score those answers. To swap a model,
+  # change its env var and restart: `docker compose up -d vllm vllm-judge`.
+  # NOTE: --quantization awq only works with AWQ-prequantized checkpoints.
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: --model ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-AWQ} --quantization awq --gpu-memory-utilization 0.75 --max-model-len 2048 --enforce-eager
+    ports:
+      - "8001:8000"
+    ipc: host
+    volumes:
+      # WSL path (compose runs from WSL). Override with HF_CACHE in .env when
+      # running compose from the Windows side (HF_CACHE=C:/Users/Ali/.cache/huggingface).
+      - "${HF_CACHE:-/mnt/c/Users/Ali/.cache/huggingface}:/root/.cache/huggingface"
+    environment:
+      VLLM_WSL2_ENABLE_PIN_MEMORY: "1" 
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Judge model for the Ragas evaluation (scores the generation model's
+  # answers; its own quality is never measured). One vLLM process serves one
+  # model, so the judge runs on a second container.
+  vllm-judge:
+    image: vllm/vllm-openai:latest
+    environment:
+      VLLM_WSL2_ENABLE_PIN_MEMORY: "1" 
+      VLLM_USE_V1: "0"
+    command: --model ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-AWQ} --quantization awq --gpu-memory-utilization 0.75 --max-model-len 2048 --enforce-eager
+    ports:
+      - "8002:8000"
+    ipc: host
+    volumes:
+      - "${HF_CACHE:-/mnt/c/Users/Ali/.cache/huggingface}:/root/.cache/huggingface"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ---- The RAG API (this project) ----
+  # Served on Docker: qdrant server mode (no more local path storage) and
+  # vLLM as the generation backend.
+  law-api:
+    build: .
+    depends_on:
+      - qdrant
+      - postgres
+      - vllm
+    environment:
+      LAW_API_STORAGE_PROVIDER: qdrant
+      LAW_API_QDRANT_URL: http://qdrant:6333
+      LAW_API_QDRANT_COLLECTION: law_chunks
+      LAW_API_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/legal
+      LAW_API_LLM_PROVIDER: vllm
+      LAW_API_LLM_MODEL: Qwen/Qwen2.5-1.5B-Instruct-AWQ
+      LAW_API_LLM_BASE_URL: http://vllm:8000/v1
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage/uploads:/app/storage/uploads
+      - ./storage/pending:/app/storage/pending
 
 volumes:
   qdrant_data:

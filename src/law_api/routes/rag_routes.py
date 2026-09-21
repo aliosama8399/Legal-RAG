@@ -1,7 +1,9 @@
 import logging
 from typing import Annotated
 
+import orjson
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from ..controllers.NLPController import NLPController
 from ..deps import get_nlp_controller
@@ -47,6 +49,36 @@ async def ask(
 ) -> AskResponse:
     """Retrieval-grounded answer with article citations."""
     return await _map_errors(lambda: controller.ask(request))
+
+
+@rag_router.post(
+    "/ask/stream",
+    response_class=StreamingResponse,
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+)
+async def ask_stream(
+    request: AskRequest,
+    controller: Annotated[NLPController, Depends(get_nlp_controller)],
+) -> StreamingResponse:
+    """Streaming retrieval-grounded answer (Server-Sent Events).
+
+    Events: ``sources`` (retrieved chunks) -> ``token`` (answer deltas)
+    -> ``done`` (final answer + citations).
+    """
+
+    async def event_stream():
+        try:
+            async for event in controller.ask_stream(request):
+                yield f"data: {orjson.dumps(event).decode('utf-8')}\n\n"
+        except ValueError as error:
+            detail = {"type": "error", "detail": str(error)}
+            yield f"data: {orjson.dumps(detail).decode('utf-8')}\n\n"
+        except Exception:
+            logger.exception("Streaming RAG request failed")
+            detail = {"type": "error", "detail": "RAG request failed"}
+            yield f"data: {orjson.dumps(detail).decode('utf-8')}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @rag_router.get(

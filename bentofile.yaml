@@ -1,0 +1,28 @@
+service: "bento_service.py:LawRAG"
+include:
+  - "bento_service.py"
+  - "src/law_api/**/*.py"
+  - "src/data/**/*.py"
+  - "config/providers.yaml"
+python:
+  packages:
+    - "pdfplumber"
+    - "sentence-transformers"
+    - "qdrant-client"
+    - "psycopg[binary]"
+    - "pgvector"
+    - "fastapi"
+    - "python-multipart"
+    - "pydantic"
+    - "pyyaml"
+    - "python-dotenv"
+    - "httpx"
+    - "openai"
+    - "orjson"
+    - "mlflow"
+    - "bentoml"
+docker:
+  distro: debian
+  python_version: "3.12"
+envs:
+  - name: LAW_API_STORAGE_PROVIDER

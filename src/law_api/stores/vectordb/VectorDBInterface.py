@@ -26,7 +26,14 @@ class VectorDBInterface(ABC):
         source_path: str,
         articles: int,
         chunks: list[dict],
-    ) -> int: ...
+        next_id_floor: int = 0,
+    ) -> int:
+        """Register a pending (not yet embedded) document and return its id.
+
+        ``next_id_floor`` is the lowest id the caller requires (e.g. derived
+        from persisted pending files) so ids are never reused across
+        restarts even when the document was not embedded yet.
+        """
 
     @abstractmethod
     async def get_document_chunks(self, document_id: int) -> list[dict]: ...

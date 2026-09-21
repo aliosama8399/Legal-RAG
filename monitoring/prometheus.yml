@@ -4,5 +4,5 @@ global:
 scrape_configs:
   - job_name: "legal-rag"
     static_configs:
-      - targets: ["host.docker.internal:8080"]
-    metrics_path: /metrics
+      - targets: ["law-api:8000"]
+    metrics_path: /api/v1/metrics
