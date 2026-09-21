@@ -162,3 +162,25 @@ def test_document_ids_are_sequential_across_restarts(tmp_path: Path):
         )
         assert second.status_code == 201
         assert second.json()["document_id"] == 2
+
+
+def test_document_ids_survive_restarts_without_embedding(tmp_path: Path):
+    """Upload, restart the app WITHOUT embedding, then upload again: the
+    persisted pending file must force a fresh id (never reuse id 1)."""
+    source = Path("src/data/raw/egyptian_civil_code.pdf")
+    with _client(tmp_path, embedder=FakeEmbedder()) as client:
+        first = client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("law.pdf", source.read_bytes(), "application/pdf")},
+        )
+        assert first.status_code == 201
+        assert first.json()["document_id"] == 1
+
+    # Restart — no embed happened; only the pending file knows about doc 1.
+    with _client(tmp_path, embedder=FakeEmbedder()) as client:
+        second = client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("law2.pdf", source.read_bytes(), "application/pdf")},
+        )
+        assert second.status_code == 201
+        assert second.json()["document_id"] == 2

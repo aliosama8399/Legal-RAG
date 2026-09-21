@@ -52,9 +52,11 @@ class QdrantProvider(VectorDBInterface):
     async def disconnect(self) -> None:
         await self.client.close()
 
-    async def save_pending_document(self, filename, source_path, articles, chunks):
-        document_id = self.next_document_id
-        self.next_document_id += 1
+    async def save_pending_document(self, filename, source_path, articles, chunks, next_id_floor: int = 0):
+        # Honor the caller's floor (derived from persisted pending files) so a
+        # restart between upload and embed never reuses an id.
+        document_id = max(self.next_document_id, next_id_floor)
+        self.next_document_id = document_id + 1
         self.pending[document_id] = chunks
         return document_id
 
@@ -140,7 +142,7 @@ class QdrantProvider(VectorDBInterface):
         hits = response.points
         if not hits:
             message = (
-                f"Document {document_id} was not found or has no embeddings"
+                f"Document {document_id} was not found or has no embeddings — you must embed the file first"
                 if document_id is not None
                 else "No relevant chunks were found"
             )

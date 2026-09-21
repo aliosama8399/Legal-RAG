@@ -18,5 +18,11 @@ class NLPController(BaseController):
         result = await self.service.ask(request.question, request.top_k, request.document_id)
         return AskResponse(**result)
 
+    async def ask_stream(self, request: AskRequest):
+        """Async generator of SSE events from the service."""
+        async for event in self.service.ask_stream(request.question, request.top_k, request.document_id):
+            yield event
+
+
     async def history(self, document_id: int | None = None, limit: int = 50) -> ChatHistoryResponse:
         return ChatHistoryResponse(results=await self.service.history(document_id, limit))

@@ -53,6 +53,23 @@ class Settings:
     llm_max_tokens: int = int(_env_or_yaml("LAW_API_LLM_MAX_TOKENS", "llm", "max_tokens", default="512"))
     rag_top_k: int = int(_env_or_yaml("LAW_API_RAG_TOP_K", "rag", "top_k", default="5"))
     max_upload_bytes: int = int(_env_or_yaml("LAW_API_MAX_UPLOAD_BYTES", "paths", "max_upload_bytes", default=str(50 * 1024 * 1024)))
+    # Evaluation: the generation model is the EVALUATED model (serves /ask);
+    # the judge only scores its answers during Ragas evaluation.
+    eval_generation_base_url: str = _env_or_yaml(
+        "LAW_API_EVAL_GENERATION_BASE_URL", "eval", "generation_base_url", default="http://127.0.0.1:8001/v1"
+    )
+    eval_generation_model: str = _env_or_yaml(
+        "LAW_API_EVAL_GENERATION_MODEL", "eval", "generation_model", default="Qwen/Qwen2.5-1.5B-Instruct-AWQ"
+    )
+    eval_judge_base_url: str = _env_or_yaml(
+        "LAW_API_EVAL_JUDGE_BASE_URL", "eval", "judge_base_url", default="http://127.0.0.1:8002/v1"
+    )
+    eval_judge_model: str = _env_or_yaml(
+        "LAW_API_EVAL_JUDGE_MODEL", "eval", "judge_model", default="Qwen/Qwen2.5-7B-Instruct-AWQ"
+    )
+    langfuse_host: str = _env_or_yaml("LANGFUSE_HOST", "langfuse", "host", default="http://127.0.0.1:3000")
+    langfuse_public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    langfuse_secret_key: str = os.getenv("LANGFUSE_SECRET_KEY", "")
 
 
 settings = Settings()

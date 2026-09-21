@@ -2,6 +2,7 @@ import asyncio
 import json
 from contextlib import nullcontext
 from pathlib import Path
+from time import perf_counter
 
 from data.prepare_law import prepare
 
@@ -10,6 +11,7 @@ from .models.schemes import LawChunk, RetrievedDocument
 from .stores.embeddings.EmbeddingInterface import EmbeddingInterface
 from .stores.llm.LLMInterface import LLMInterface
 from .stores.vectordb.VectorDBInterface import VectorDBInterface
+from .tracking.langfuse_tracker import LangfuseTracker
 from .tracking.mlflow_tracker import MLflowTracker
 
 
@@ -27,15 +29,39 @@ class DocumentIngestionService:
         self.tracker = tracker
 
     async def upload_and_chunk(self, pdf_path: Path, filename: str) -> dict:
-        # pdfplumber extraction is blocking CPU work — run it off the event loop.
+        # pdfplumber extraction is blocking CPU work — run it off the event loop,
+        # and skip it entirely when this exact PDF was already processed
+        # (uploads are content-hash named; parsing the 170-page law PDF is slow).
         output_dir = pdf_path.parent / "processed"
-        article_path, chunk_path = await asyncio.to_thread(prepare, pdf_path, output_dir)
-        articles = await asyncio.to_thread(self._read_jsonl, article_path)
+        import hashlib
+
+        source_hash = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+        marker = output_dir / ".source_hash"
+        articles_path = output_dir / "law_articles.jsonl"
+        chunk_path = output_dir / "law_chunks.jsonl"
+        if not (
+            marker.is_file()
+            and marker.read_text(encoding="utf-8").strip() == source_hash
+            and articles_path.is_file()
+            and chunk_path.is_file()
+        ):
+            await asyncio.to_thread(prepare, pdf_path, output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(source_hash, encoding="utf-8")
+        articles = await asyncio.to_thread(self._read_jsonl, articles_path)
         chunks = await asyncio.to_thread(self._read_jsonl, chunk_path)
         # Validate every chunk through pydantic before it is stored.
         validated_chunks = [LawChunk.model_validate(chunk).model_dump() for chunk in chunks]
+        # Id floor from persisted pending files: pending files survive restarts,
+        # so a restart between upload and embed never reuses an id.
+        pending_ids = [
+            int(path.stem)
+            for path in self.settings.pending_dir.glob("*.json")
+            if path.stem.isdigit()
+        ]
+        next_id_floor = (max(pending_ids) + 1) if pending_ids else 1
         document_id = await self.storage.save_pending_document(
-            filename, str(pdf_path), len(articles), validated_chunks
+            filename, str(pdf_path), len(articles), validated_chunks, next_id_floor
         )
         pending_path = self.settings.pending_dir / f"{document_id}.json"
         pending_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +124,7 @@ class RAGQueryService:
         top_k: int = 5,
         temperature: float = 0.0,
         max_tokens: int = 512,
+        langfuse: LangfuseTracker | None = None,
     ) -> None:
         self.storage = storage
         self.embedder = embedder
@@ -105,23 +132,34 @@ class RAGQueryService:
         self.top_k = top_k
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.langfuse = langfuse
+
+    @staticmethod
+    def _validated_results(raw_results: list[dict]) -> list[dict]:
+        # Older stores may hold chunks with empty text (placeholder articles);
+        # never return them as search hits.
+        return [
+            RetrievedDocument.model_validate(item).model_dump()
+            for item in raw_results
+            if item.get("chunk_text", "").strip()
+        ]
 
     async def search(self, question: str, top_k: int | None = None, document_id: int | None = None) -> list[dict]:
         if not question.strip():
             raise ValueError("Question must not be empty")
         query_vector = (await self.embedder.encode([question]))[0]
-        results = await self.storage.search(document_id, query_vector, top_k or self.top_k)
-        # Validate every retrieved chunk through pydantic before it leaves the service.
-        return [RetrievedDocument.model_validate(item).model_dump() for item in results]
+        return self._validated_results(
+            await self.storage.search(document_id, query_vector, top_k or self.top_k)
+        )
 
     async def ask(self, question: str, top_k: int | None = None, document_id: int | None = None) -> dict:
         if not question.strip():
             raise ValueError("Question must not be empty")
+        started = perf_counter()
         query_vector = (await self.embedder.encode([question]))[0]
-        results = [
-            RetrievedDocument.model_validate(item).model_dump()
-            for item in await self.storage.search(document_id, query_vector, top_k or self.top_k)
-        ]
+        results = self._validated_results(
+            await self.storage.search(document_id, query_vector, top_k or self.top_k)
+        )
         base = {
             "question": question,
             "sources": results,
@@ -134,18 +172,78 @@ class RAGQueryService:
             await self.storage.save_chat_message(question, answer, results, document_id, query_vector)
             return {**base, "answer": answer}
 
-        context = "\n\n".join(f"[{chunk['citation']}] {chunk['chunk_text']}" for chunk in results)
-        system = (
-            "You are a legal research assistant. Answer only using the provided "
-            "Egyptian Civil Code articles and cite the article number for every claim. "
-            "If the answer is not contained in the provided articles, say so."
-        )
-        prompt = f"Articles:\n{context}\n\nQuestion: {question}\nAnswer:"
         answer = await self.llm.generate(
-            prompt, system=system, temperature=self.temperature, max_tokens=self.max_tokens
+            self._build_prompt(results, question),
+            system=self._SYSTEM_PROMPT,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
         )
         await self.storage.save_chat_message(question, answer, results, document_id, query_vector)
+        self._trace_ask(question, results, answer, started)
         return {**base, "answer": answer}
+
+    def _trace_ask(self, question: str, results: list[dict], answer: str, started: float) -> None:
+        if self.langfuse is None:
+            return
+        with self.langfuse.trace(
+            "rag-ask",
+            question=question,
+            llm_model=self.llm.model_id,
+            embedding_model=self.embedder.model_id,
+            sources=[chunk["citation"] for chunk in results],
+            latency_seconds=round(perf_counter() - started, 3),
+        ) as observation:
+            if observation is not None:
+                observation.update(output={"answer": answer})
+
+    _SYSTEM_PROMPT = (
+        "You are a legal research assistant. Answer only using the provided "
+        "Egyptian Civil Code articles and cite the article number for every claim. "
+        "If the answer is not contained in the provided articles, say so."
+    )
+
+    @staticmethod
+    def _build_prompt(results: list[dict], question: str) -> str:
+        context = "\n\n".join(f"[{chunk['citation']}] {chunk['chunk_text']}" for chunk in results)
+        return f"Articles:\n{context}\n\nQuestion: {question}\nAnswer:"
+
+    async def ask_stream(
+        self, question: str, top_k: int | None = None, document_id: int | None = None
+    ):
+        """Async generator yielding SSE events: sources -> tokens -> done.
+
+        The query embedding happens once (one short question string); the
+        stored chunk embeddings from /embed are reused, never remade.
+        """
+        if not question.strip():
+            raise ValueError("Question must not be empty")
+        started = perf_counter()
+        query_vector = (await self.embedder.encode([question]))[0]
+        results = self._validated_results(
+            await self.storage.search(document_id, query_vector, top_k or self.top_k)
+        )
+        yield {"type": "sources", "question": question, "sources": results}
+
+        if not results:
+            answer = "No relevant articles were found for this question."
+            await self.storage.save_chat_message(question, answer, results, document_id, query_vector)
+            yield {"type": "done", "answer": answer, "sources": results}
+            return
+
+        collected: list[str] = []
+        async for token in self.llm.generate_stream(
+            self._build_prompt(results, question),
+            system=self._SYSTEM_PROMPT,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        ):
+            collected.append(token)
+            yield {"type": "token", "text": token}
+
+        answer = "".join(collected)
+        await self.storage.save_chat_message(question, answer, results, document_id, query_vector)
+        self._trace_ask(question, results, answer, started)
+        yield {"type": "done", "answer": answer, "sources": results}
 
     async def history(self, document_id: int | None = None, limit: int = 50) -> list[dict]:
         return await self.storage.list_chat_history(document_id, limit)

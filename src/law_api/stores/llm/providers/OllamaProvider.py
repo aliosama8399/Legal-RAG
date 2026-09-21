@@ -1,4 +1,6 @@
 import asyncio
+import json
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -27,6 +29,19 @@ class OllamaProvider(LLMInterface):
             self._client = httpx.AsyncClient(base_url=self._base_url, timeout=300.0)
         return self._client
 
+    @staticmethod
+    def _payload(model_id: str, prompt: str, system: str | None, temperature: float, max_tokens: int, stream: bool) -> dict:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        return {
+            "model": model_id,
+            "messages": messages,
+            "stream": stream,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+
     async def generate(
         self,
         prompt: str,
@@ -36,16 +51,8 @@ class OllamaProvider(LLMInterface):
         max_tokens: int = 512,
     ) -> str:
         client = self._ensure_client()
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        payload = {
-            "model": self.model_id,
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }
+        payload = self._payload(self.model_id, prompt, system, temperature, max_tokens, stream=False)
+        payload["model"] = self.model_id
 
         last_error: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
@@ -71,3 +78,27 @@ class OllamaProvider(LLMInterface):
             "Is Ollama running (ollama serve) and the model pulled (ollama pull "
             f"{self.model_id})?"
         ) from last_error
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> AsyncIterator[str]:
+        client = self._ensure_client()
+        payload = self._payload(self.model_id, prompt, system, temperature, max_tokens, stream=True)
+        payload["model"] = self.model_id
+
+        async with client.stream("POST", "/api/chat", json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.strip():
+                    continue
+                data = json.loads(line)
+                token = data.get("message", {}).get("content", "")
+                if token:
+                    yield token
+                if data.get("done"):
+                    break
