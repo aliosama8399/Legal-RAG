@@ -34,7 +34,6 @@ storage/mlartifacts/
 # MLflow / models / artifacts
 mlruns/
 artifacts/
-models/
 *.onnx
 *.safetensors
 *.gguf

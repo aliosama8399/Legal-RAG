@@ -2,96 +2,52 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .config import Settings, settings
-from .services import DocumentIngestionService, RAGQueryService
-from .stores.embeddings.EmbeddingInterface import EmbeddingInterface
-from .stores.embeddings.EmbeddingProviderFactory import EmbeddingProviderFactory
-from .stores.llm.LLMInterface import LLMInterface
-from .stores.llm.LLMProviderFactory import LLMProviderFactory
-from .stores.vectordb.VectorDBInterface import VectorDBInterface
-from .stores.vectordb.VectorDBProviderFactory import VectorDBProviderFactory
-from .tracking.langfuse_tracker import LangfuseTracker
-from .tracking.mlflow_tracker import MLflowTracker
-
-# Pre-configured instances for tests (set via create_app() before startup).
-_preconfig: dict = {}
+from .config import Settings
+from .lifecycle import initialize_services, shutdown_services
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create shared resources on startup; clean up on shutdown."""
-    resolved_settings = _preconfig.get("settings") or settings
-
-    storage = _preconfig.get("storage") or VectorDBProviderFactory.create(resolved_settings)
-    embedder = _preconfig.get("embedder") or EmbeddingProviderFactory.create(resolved_settings.embedding_name)
-    llm = _preconfig.get("llm") or LLMProviderFactory.create(
-        resolved_settings.llm_provider,
-        resolved_settings.llm_model,
-        resolved_settings.llm_api_key,
-        resolved_settings.llm_base_url,
-    )
-    # "tracker" absent from preconfig -> create a real tracker; explicitly None -> no tracking.
-    tracker = _preconfig["tracker"] if "tracker" in _preconfig else MLflowTracker(
-        resolved_settings.mlflow_tracking_uri, resolved_settings.mlflow_experiment
-    )
-
-    # Establish the database connection (Qdrant id recovery / Postgres schema init).
-    await storage.connect()
-
-    app.state.settings = resolved_settings
-    app.state.storage = storage
-    app.state.embedder = embedder
-    app.state.llm = llm
-    app.state.tracker = tracker
-    langfuse_tracker = LangfuseTracker(
-        resolved_settings.langfuse_host,
-        resolved_settings.langfuse_public_key,
-        resolved_settings.langfuse_secret_key,
-    )
-    app.state.ingestion_service = DocumentIngestionService(resolved_settings, storage, embedder, tracker)
-    app.state.rag_service = RAGQueryService(
-        storage, embedder, llm,
-        resolved_settings.rag_top_k, resolved_settings.llm_temperature, resolved_settings.llm_max_tokens,
-        langfuse=langfuse_tracker,
-    )
-
+    await initialize_services(app)
     yield
-
-    # Shutdown: close the storage connection and flush observability.
-    await storage.disconnect()
-    langfuse_tracker.flush()
-    if tracker is not None:
-        try:
-            import mlflow as mlflow_module
-
-            mlflow_module.end_run()
-        except Exception:
-            pass
+    await shutdown_services(app)
 
 
 def create_app(
     settings: Settings | None = None,
-    embedder: EmbeddingInterface | None = None,
-    storage: VectorDBInterface | None = None,
-    llm: LLMInterface | None = None,
-    tracker: MLflowTracker | None = None,
+    embedder=None,
+    storage=None,
+    llm=None,
+    tracker=None,
     enable_tracking: bool = True,
+    reranker=None,
 ) -> FastAPI:
-    """Create and configure the FastAPI app. Pre-configured instances are used for tests."""
+    """Create and configure the FastAPI app.
+
+    Pre-configured instances (tests) sit on ``app.state._preconfig`` and are
+    consumed by the lazy initializer — works under plain uvicorn (lifespan)
+    and under BentoML (mounted ASGI, lifespan never runs), because deps.py
+    also calls ``ensure_services`` before every request.
+    """
+    preconfig: dict = {}
     if settings is not None:
-        _preconfig["settings"] = settings
+        preconfig["settings"] = settings
     if storage is not None:
-        _preconfig["storage"] = storage
+        preconfig["storage"] = storage
     if embedder is not None:
-        _preconfig["embedder"] = embedder
+        preconfig["embedder"] = embedder
     if llm is not None:
-        _preconfig["llm"] = llm
+        preconfig["llm"] = llm
     if tracker is not None:
-        _preconfig["tracker"] = tracker
+        preconfig["tracker"] = tracker
     if not enable_tracking:
-        _preconfig["tracker"] = None
+        preconfig["tracker"] = None
+    if reranker is not None:
+        preconfig["reranker"] = reranker
 
     app = FastAPI(title="Egyptian Civil Code Data API", version="2.0.0", lifespan=lifespan)
+    app.state._preconfig = preconfig
     _include_routes(app)
     return app
 

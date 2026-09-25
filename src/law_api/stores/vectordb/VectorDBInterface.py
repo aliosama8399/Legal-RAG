@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 class VectorDBInterface(ABC):
     """Abstract base class for storage/vector-db providers.
 
-    Every backend (Qdrant, PostgreSQL/pgvector, in-memory) must inherit
+    Every backend (Qdrant, PostgreSQL/pgvector) must inherit
     from this class and implement every method below. Connection setup is
     done in ``connect`` (called from the app lifespan), not ``__init__``.
     """

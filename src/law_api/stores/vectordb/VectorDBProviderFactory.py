@@ -1,7 +1,7 @@
 from ...helpers.config import Settings
 from .VectorDBEnum import VectorDBEnum
 from .VectorDBInterface import VectorDBInterface
-from .providers import InMemoryStorageProvider, PostgreSQLProvider, QdrantProvider
+from .providers import PostgreSQLProvider, QdrantProvider
 
 
 class VectorDBProviderFactory:
@@ -16,7 +16,5 @@ class VectorDBProviderFactory:
             return QdrantProvider(url=settings.qdrant_url, collection=settings.qdrant_collection)
         if provider == VectorDBEnum.PGVECTOR.value:
             return PostgreSQLProvider(settings.postgres_dsn)
-        if provider == VectorDBEnum.IN_MEMORY_TEST.value:
-            return InMemoryStorageProvider()
         choices = ", ".join(f"'{member.value}'" for member in VectorDBEnum)
         raise ValueError(f"LAW_API_STORAGE_PROVIDER must be one of: {choices}")

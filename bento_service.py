@@ -9,6 +9,11 @@ Serve:  bentoml serve law-rag:latest --port 3000
 The FastAPI app (routes under /api/v1/...) is mounted at "/", so all
 endpoints (/api/v1/documents/upload, /api/v1/ask/stream, ...) work through
 the BentoML HTTP server unchanged.
+
+NOTE: @bentoml.asgi_app MUST decorate the CLASS (below @bentoml.service) —
+the service factory reads __bentoml_mounted_apps__ from the class object;
+decorating a method stores it on the function and the mount is never applied
+(all routes 404).
 """
 
 import sys
@@ -22,9 +27,6 @@ from law_api.main import app as fastapi_app
 
 
 @bentoml.service(name="law-rag")
+@bentoml.asgi_app(fastapi_app, path="/")
 class LawRAG:
     """Serves the Egyptian Civil Code RAG; generation is delegated to vLLM."""
-
-    @bentoml.asgi_app(fastapi_app, path="/")
-    def api(self):
-        return fastapi_app

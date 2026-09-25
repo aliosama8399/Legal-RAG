@@ -1,15 +1,24 @@
-services:
+﻿services:
   # ---- Vector databases (both provider backends available) ----
   qdrant:
     image: qdrant/qdrant:v1.10.1
+    restart: unless-stopped
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    # The image ships bash only (no curl/wget/python) â€” TCP probe via /dev/tcp.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -18,10 +27,17 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d legal"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   # ---- Tracking / observability ----
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.14.3
+    restart: unless-stopped
     command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root file:///mlflow/artifacts
     ports:
       - "5000:5000"
@@ -30,9 +46,10 @@ services:
 
   langfuse:
     image: ghcr.io/langfuse/langfuse:2
+    restart: unless-stopped
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
@@ -44,6 +61,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.53.0
+    restart: unless-stopped
     # Mount the directory (not the single file): file bind mounts from WSL hit
     # the Docker Desktop docker-desktop-bind-mounts registry bug ("not a
     # directory"). Point --config.file at the mounted copy instead.
@@ -55,6 +73,7 @@ services:
 
   grafana:
     image: grafana/grafana:11.0.0
+    restart: unless-stopped
     ports:
       - "9091:3000"
     environment:
@@ -62,25 +81,39 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
 
-  # ---- Generative models: vLLM (OpenAI-compatible, AWQ-4bit) ----
-  # Write any HF model ID in VLLM_MODEL / VLLM_JUDGE_MODEL (see .env) and
-  # vLLM serves it — it downloads the weights into the mounted cache itself.
-  # The base model serves /ask (the evaluated model); the judge model is used
-  # only by the Ragas evaluation to score those answers. To swap a model,
-  # change its env var and restart: `docker compose up -d vllm vllm-judge`.
-  # NOTE: --quantization awq only works with AWQ-prequantized checkpoints.
+  # ---- Generative model: vLLM (OpenAI-compatible) ----
+  # Write any HF model ID in VLLM_MODEL (see .env) â€” vLLM serves it and
+  # downloads the weights into the mounted cache itself (shared with other
+  # projects on this machine; downloads persist across container recreation).
+  # HARDWARE NOTE (GTX 1660 Ti, sm_75): AWQ kernels (marlin) require sm_80+ â€”
+  # on Turing AWQ containers crash at startup, which is the "server
+  # disconnected/we get a connection error" you saw from the API. Use a plain
+  # FP16 checkpoint (e.g. Qwen/Qwen2.5-1.5B-Instruct) instead of AWQ.
   vllm:
     image: vllm/vllm-openai:latest
-    command: --model ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-AWQ} --quantization awq --gpu-memory-utilization 0.75 --max-model-len 2048 --enforce-eager
+    restart: unless-stopped
+    # gpu-memory-utilization 0.75: single engine on the 6 GB card. Weights
+    # (2.88 GiB) + a REAL KV cache — 0.50 starves the cache (works once, then
+    # "No available memory for the cache blocks" on the second request).
+    # vLLM reuses models from the shared cache volume or downloads on demand.
+    command: --model ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct} --dtype float16 --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.75} --max-model-len 2048 --enforce-eager
     ports:
       - "8001:8000"
     ipc: host
     volumes:
-      # WSL path (compose runs from WSL). Override with HF_CACHE in .env when
-      # running compose from the Windows side (HF_CACHE=C:/Users/Ali/.cache/huggingface).
-      - "${HF_CACHE:-/mnt/c/Users/Ali/.cache/huggingface}:/root/.cache/huggingface"
+      # Named volume = Linux-native ext4 inside Docker (fast, no 9P, no
+      # Windows-symlink breakage). See service-level comment in `volumes:` below.
+      - hf_cache:/root/.cache/huggingface
     environment:
-      VLLM_WSL2_ENABLE_PIN_MEMORY: "1" 
+      VLLM_WSL2_ENABLE_PIN_MEMORY: "1"
+    # A running container is not enough: the API server only listens after
+    # the engine has loaded the model. Bento waits for this health check.
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 10m
     deploy:
       resources:
         reservations:
@@ -89,54 +122,67 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # Judge model for the Ragas evaluation (scores the generation model's
-  # answers; its own quality is never measured). One vLLM process serves one
-  # model, so the judge runs on a second container.
-  vllm-judge:
-    image: vllm/vllm-openai:latest
-    environment:
-      VLLM_WSL2_ENABLE_PIN_MEMORY: "1" 
-      VLLM_USE_V1: "0"
-    command: --model ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct-AWQ} --quantization awq --gpu-memory-utilization 0.75 --max-model-len 2048 --enforce-eager
-    ports:
-      - "8002:8000"
-    ipc: host
-    volumes:
-      - "${HF_CACHE:-/mnt/c/Users/Ali/.cache/huggingface}:/root/.cache/huggingface"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # ---- The RAG API (this project) ----
-  # Served on Docker: qdrant server mode (no more local path storage) and
-  # vLLM as the generation backend.
-  law-api:
-    build: .
+  # ---- Public RAG API: BentoML + FastAPI (the production chassis) ----
+  # BentoML packages and serves the FastAPI RAG app (bento_service.py); the
+  # FastAPI app is mounted at "/" so every /api/v1/... endpoint works
+  # unchanged. Retrieval goes to Qdrant; generation goes to the vLLM service;
+  # the cross-encoder reranker runs in-process. This is the sole public API:
+  # local development runs `uv run uvicorn law_api.main:app` directly instead.
+  bento-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.bento
+    restart: unless-stopped
     depends_on:
-      - qdrant
-      - postgres
-      - vllm
+      qdrant:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      vllm:
+        condition: service_healthy
     environment:
       LAW_API_STORAGE_PROVIDER: qdrant
       LAW_API_QDRANT_URL: http://qdrant:6333
       LAW_API_QDRANT_COLLECTION: law_chunks
       LAW_API_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/legal
       LAW_API_LLM_PROVIDER: vllm
-      LAW_API_LLM_MODEL: Qwen/Qwen2.5-1.5B-Instruct-AWQ
+      LAW_API_LLM_MODEL: Qwen/Qwen2.5-1.5B-Instruct
       LAW_API_LLM_BASE_URL: http://vllm:8000/v1
+      LAW_API_UPLOAD_DIR: /app/storage/uploads
+      LAW_API_PENDING_DIR: /app/storage/pending
+      LAW_API_RERANK: "true"
+      LAW_API_RERANKER: bge-reranker-base
+      LAW_API_RERANK_CANDIDATES: "10"
+      LAW_API_RERANK_MAX_LENGTH: "256"
       MLFLOW_TRACKING_URI: http://mlflow:5000
     ports:
-      - "8000:8000"
+      - "8000:3000"
     volumes:
       - ./storage/uploads:/app/storage/uploads
       - ./storage/pending:/app/storage/pending
+      - uv_venv:/opt/venv    # persistent venv (seeded from the image on first run)
+      - uv_cache:/root/.cache/uv   # persistent download cache
+      # Persist the sentence-transformers weights (embedding model + reranker)
+      # across container recreation — shares the same named volume as vLLM.
+      - hf_cache:/root/.cache/huggingface
+    # BentoML's own health endpoint (the FastAPI app is mounted under it).
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/healthz', timeout=2)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 1m
 
 volumes:
   qdrant_data:
   pg_data:
   mlflow_data:
   grafana_data:
+  uv_venv:
+  uv_cache:
+  # Shared HuggingFace cache for all vLLM engines and the bento-api
+  # (sentence-transformers): Linux-native ext4 inside Docker — fast loads,
+  # downloads happen automatically on first use and persist afterwards.
+  # populate it from your existing Windows cache ONCE with:
+  #   docker compose cp  C:/Users/Ali/.cache/huggingface/hub/. vllm:/root/.cache/huggingface/hub/
+  hf_cache:

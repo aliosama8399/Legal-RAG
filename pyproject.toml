@@ -43,6 +43,15 @@ dev = [
     "ragas>=0.4",
     "langfuse>=2.50",
 ]
+serve = [
+    "bentoml>=1.3",
+    # bentoml's `fs` dependency imports pkg_resources at import time;
+    # setuptools 81+ removed pkg_resources — pin below the removal.
+    "setuptools>=68,<81",
+    # uvicorn's websockets protocol reads websockets.__version__, which
+    # websockets 14+ removed — pin below it.
+    "websockets>=10.4,<14",
+]
 mlops = [
     "mlflow>=2.14,<3",
     "ragas>=0.2",

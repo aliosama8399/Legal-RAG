@@ -27,6 +27,10 @@ llm:
 
 rag:
   top_k: 5
+  rerank: true
+  reranker: bge-reranker-base # bge-reranker-base (fast) or bge-reranker-v2-m3 (better, slower)
+  rerank_candidates: 10
+  rerank_max_length: 256
 
 paths:
   upload_dir: storage/uploads
