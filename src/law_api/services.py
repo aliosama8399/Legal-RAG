@@ -10,6 +10,7 @@ from .config import Settings
 from .models.schemes import LawChunk, RetrievedDocument
 from .stores.embeddings.EmbeddingInterface import EmbeddingInterface
 from .stores.llm.LLMInterface import LLMInterface
+from .stores.rerankers.RerankerInterface import RerankerInterface
 from .stores.vectordb.VectorDBInterface import VectorDBInterface
 from .tracking.langfuse_tracker import LangfuseTracker
 from .tracking.mlflow_tracker import MLflowTracker
@@ -125,6 +126,8 @@ class RAGQueryService:
         temperature: float = 0.0,
         max_tokens: int = 512,
         langfuse: LangfuseTracker | None = None,
+        reranker: RerankerInterface | None = None,
+        rerank_candidates: int = 20,
     ) -> None:
         self.storage = storage
         self.embedder = embedder
@@ -133,6 +136,8 @@ class RAGQueryService:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.langfuse = langfuse
+        self.reranker = reranker
+        self.rerank_candidates = rerank_candidates
 
     @staticmethod
     def _validated_results(raw_results: list[dict]) -> list[dict]:
@@ -144,22 +149,36 @@ class RAGQueryService:
             if item.get("chunk_text", "").strip()
         ]
 
+    async def _retrieve(
+        self, question: str, top_k: int | None, document_id: int | None
+    ) -> tuple[list[float], list[dict]]:
+        """Vector search, then cross-encoder reranking over a larger candidate set."""
+        limit = top_k or self.top_k
+        query_vector = (await self.embedder.encode([question]))[0]
+        fetch = max(limit, self.rerank_candidates) if self.reranker else limit
+        candidates = self._validated_results(
+            await self.storage.search(document_id, query_vector, fetch)
+        )
+        if self.reranker and len(candidates) > limit:
+            documents = [chunk["chunk_text"] for chunk in candidates]
+            scores = await self.reranker.rerank(question, documents)
+            candidates = [
+                {**chunk, "score": float(score)}
+                for chunk, score in sorted(zip(candidates, scores), key=lambda pair: pair[1], reverse=True)
+            ]
+        return query_vector, candidates[:limit]
+
     async def search(self, question: str, top_k: int | None = None, document_id: int | None = None) -> list[dict]:
         if not question.strip():
             raise ValueError("Question must not be empty")
-        query_vector = (await self.embedder.encode([question]))[0]
-        return self._validated_results(
-            await self.storage.search(document_id, query_vector, top_k or self.top_k)
-        )
+        _, results = await self._retrieve(question, top_k, document_id)
+        return results
 
     async def ask(self, question: str, top_k: int | None = None, document_id: int | None = None) -> dict:
         if not question.strip():
             raise ValueError("Question must not be empty")
         started = perf_counter()
-        query_vector = (await self.embedder.encode([question]))[0]
-        results = self._validated_results(
-            await self.storage.search(document_id, query_vector, top_k or self.top_k)
-        )
+        query_vector, results = await self._retrieve(question, top_k, document_id)
         base = {
             "question": question,
             "sources": results,
@@ -197,9 +216,11 @@ class RAGQueryService:
                 observation.update(output={"answer": answer})
 
     _SYSTEM_PROMPT = (
-        "You are a legal research assistant. Answer only using the provided "
-        "Egyptian Civil Code articles and cite the article number for every claim. "
-        "If the answer is not contained in the provided articles, say so."
+        "You are a helpful legal research assistant for the Egyptian Civil Code. "
+        "Answer the user's question directly and concisely in 2-4 sentences, "
+        "quoting the relevant article text when it answers the question. "
+        "Always cite article numbers inline like (Article 147). "
+        "If the provided articles do not contain the answer, say so in one sentence."
     )
 
     @staticmethod
@@ -218,10 +239,7 @@ class RAGQueryService:
         if not question.strip():
             raise ValueError("Question must not be empty")
         started = perf_counter()
-        query_vector = (await self.embedder.encode([question]))[0]
-        results = self._validated_results(
-            await self.storage.search(document_id, query_vector, top_k or self.top_k)
-        )
+        query_vector, results = await self._retrieve(question, top_k, document_id)
         yield {"type": "sources", "question": question, "sources": results}
 
         if not results:

@@ -52,6 +52,10 @@ class Settings:
     llm_temperature: float = float(_env_or_yaml("LAW_API_LLM_TEMPERATURE", "llm", "temperature", default="0.0"))
     llm_max_tokens: int = int(_env_or_yaml("LAW_API_LLM_MAX_TOKENS", "llm", "max_tokens", default="512"))
     rag_top_k: int = int(_env_or_yaml("LAW_API_RAG_TOP_K", "rag", "top_k", default="5"))
+    rag_reranker: str = _env_or_yaml("LAW_API_RERANKER", "rag", "reranker", default="bge-reranker-base")
+    rag_rerank_candidates: int = int(_env_or_yaml("LAW_API_RERANK_CANDIDATES", "rag", "rerank_candidates", default="10"))
+    rag_rerank_max_length: int = int(_env_or_yaml("LAW_API_RERANK_MAX_LENGTH", "rag", "rerank_max_length", default="256"))
+    rag_rerank_enabled: bool = _env_or_yaml("LAW_API_RERANK", "rag", "rerank", default="true").lower() not in ("false", "0", "off", "no")
     max_upload_bytes: int = int(_env_or_yaml("LAW_API_MAX_UPLOAD_BYTES", "paths", "max_upload_bytes", default=str(50 * 1024 * 1024)))
     # Evaluation: the generation model is the EVALUATED model (serves /ask);
     # the judge only scores its answers during Ragas evaluation.
@@ -61,11 +65,13 @@ class Settings:
     eval_generation_model: str = _env_or_yaml(
         "LAW_API_EVAL_GENERATION_MODEL", "eval", "generation_model", default="Qwen/Qwen2.5-1.5B-Instruct-AWQ"
     )
+    # Evaluation (Option A): the judge is the SAME model served by the same
+    # generation vLLM server — a 6 GB GPU cannot host a second engine.
     eval_judge_base_url: str = _env_or_yaml(
-        "LAW_API_EVAL_JUDGE_BASE_URL", "eval", "judge_base_url", default="http://127.0.0.1:8002/v1"
+        "LAW_API_EVAL_JUDGE_BASE_URL", "eval", "judge_base_url", default="http://127.0.0.1:8001/v1"
     )
     eval_judge_model: str = _env_or_yaml(
-        "LAW_API_EVAL_JUDGE_MODEL", "eval", "judge_model", default="Qwen/Qwen2.5-7B-Instruct-AWQ"
+        "LAW_API_EVAL_JUDGE_MODEL", "eval", "judge_model", default="Qwen/Qwen2.5-1.5B-Instruct"
     )
     langfuse_host: str = _env_or_yaml("LANGFUSE_HOST", "langfuse", "host", default="http://127.0.0.1:3000")
     langfuse_public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")

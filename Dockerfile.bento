@@ -1,0 +1,30 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Dependencies first (cached layer) — base set plus the BentoML extra.
+# BuildKit cache mount: uv's download cache persists across builds, so a
+# changed lockfile only downloads NEW packages.
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev --extra serve
+
+# Application code + config + BentoML service definition.
+COPY src ./src
+COPY config ./config
+COPY bento_service.py bentofile.yaml ./
+
+# Build the bento at image-build time so the container only serves it.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv run --no-dev --extra serve bentoml build
+
+EXPOSE 3000
+
+# --no-sync: the venv is fully synced at build time — container start must
+# NOT re-run the sync (no re-download, no reinstall, no resolution).
+CMD ["uv", "run", "--no-dev", "--extra", "serve", "bentoml", "serve", "law-rag:latest", "--host", "0.0.0.0", "--port", "3000"]
