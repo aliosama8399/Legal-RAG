@@ -15,12 +15,26 @@ class NLPController(BaseController):
         return SearchResponse(query=request.question, results=results)
 
     async def ask(self, request: AskRequest) -> AskResponse:
-        result = await self.service.ask(request.question, request.top_k, request.document_id)
+        result = await self.service.ask(
+            request.question,
+            request.top_k,
+            request.document_id,
+            evaluate=request.evaluate,
+            expected_article=request.expected_article,
+            eval_metrics=request.eval_metrics,
+        )
         return AskResponse(**result)
 
     async def ask_stream(self, request: AskRequest):
         """Async generator of SSE events from the service."""
-        async for event in self.service.ask_stream(request.question, request.top_k, request.document_id):
+        async for event in self.service.ask_stream(
+            request.question,
+            request.top_k,
+            request.document_id,
+            evaluate=request.evaluate,
+            expected_article=request.expected_article,
+            eval_metrics=request.eval_metrics,
+        ):
             yield event
 
 

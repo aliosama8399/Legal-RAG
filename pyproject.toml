@@ -14,6 +14,9 @@ dependencies = [
     "arabic-reshaper>=3.0",
     "python-bidi>=0.4",
     "sentence-transformers>=3.0",
+    # Declared directly so [tool.uv.sources] below can route it to the CPU-only
+    # wheel index (the API container has no GPU; vLLM owns the GPU).
+    "torch>=2.4",
     "datasets>=2.19",
     "qdrant-client>=1.10",
     "psycopg[binary]>=3.1",
@@ -51,9 +54,21 @@ serve = [
     # uvicorn's websockets protocol reads websockets.__version__, which
     # websockets 14+ removed — pin below it.
     "websockets>=10.4,<14",
+    # Live Langfuse tracing from the served app (LangfuseTracker).
+    "langfuse>=2.50",
+    # /metrics must expose the RAG metrics, not just the interpreter defaults.
+    "prometheus-client>=0.20",
+    # PII guardrail on /ask. presidio-analyzer pulls spacy; the spaCy model
+    # itself is installed by the bento image (see Dockerfile.bento).
+    "presidio-analyzer>=2.2",
+]
+eval = [
+    "ragas>=0.4",
+    "langfuse>=2.50",
+    "mlflow>=3.16",
 ]
 mlops = [
-    "mlflow>=2.14,<3",
+    "mlflow>=3.16",
     "ragas>=0.2",
     "bentoml>=1.3",
     "langfuse>=2.50",
@@ -70,6 +85,14 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.ruff]
 line-length = 100

@@ -113,7 +113,8 @@ def _log_mlflow(metrics: dict, extra_params: dict | None = None) -> None:
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
         mlflow.set_experiment(settings.mlflow_experiment)
         with mlflow.start_run(run_name=f"retrieval-{metrics['embedding_model']}"):
-            params = {"embedding_model": metrics["embedding_model"]}
+            mlflow.set_tag("eval_phase", "retrieval")
+            params = {"embedding_model": metrics["embedding_model"], "top_k": metrics.get("top_k", "")}
             if extra_params:
                 params.update(extra_params)
             mlflow.log_params(params)
@@ -124,13 +125,50 @@ def _log_mlflow(metrics: dict, extra_params: dict | None = None) -> None:
         print(f"mlflow logging failed (best-effort): {error}")
 
 
+def _log_langfuse(metrics: dict) -> None:
+    """Publish one retrieval result to Langfuse as a trace carrying its scores.
+
+    Retrieval makes no LLM call, so there is no generation to trace — but the
+    sweep is still an evaluation, and writing it as scores means the embedding
+    comparison is visible in Langfuse next to the Ragas traces, not only in
+    MLflow.
+    """
+    from .ragas_eval import _langfuse_client
+
+    client = _langfuse_client()
+    if client is None:
+        return
+    model_name = metrics.get("embedding_model", "unknown")
+    top_k = metrics.get("top_k", "")
+    scored = {
+        key: float(value)
+        for key, value in metrics.items()
+        if isinstance(value, (int, float)) and key not in ("total_queries",)
+    }
+    try:
+        with client.start_as_current_observation(
+            as_type="span",
+            name="retrieval-eval",
+            input={"embedding_model": model_name, "top_k": top_k},
+            metadata={"total_queries": str(metrics.get("total_queries", ""))},
+        ) as span:
+            for name, value in scored.items():
+                if span is not None:
+                    span.score(name=name, value=value)
+            if span is not None:
+                span.update(output=scored)
+        client.flush()
+    except Exception as error:  # noqa: BLE001 - tracing is best-effort
+        print(f"langfuse logging failed (best-effort): {error}")
+
+
 async def run_sweep(
     dataset: list[dict],
     chunks: list[dict],
     model_names: list[str],
     top_k_values: list[int],
 ) -> list[dict]:
-    """Evaluate all (model, top_k) combinations; log each to MLflow."""
+    """Evaluate all (model, top_k) combinations; log each to MLflow + Langfuse."""
     results = []
     for model_name in model_names:
         for top_k in top_k_values:
@@ -141,6 +179,7 @@ async def run_sweep(
                 print(f"  FAILED: {error}")
                 continue
             _log_mlflow(metrics)
+            _log_langfuse(metrics)
             print(f"  {json.dumps(metrics)}")
             results.append(metrics)
     return results

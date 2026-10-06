@@ -1,14 +1,32 @@
-﻿services:
-  # ---- Vector databases (both provider backends available) ----
+﻿# =============================================================================
+#  Law RAG - slimmed stack
+#  Always on : qdrant, vllm, bento-api
+#  Opt-in    : --profile langfuse | tracking | metrics | datastores | eval
+#  Tunables (put in .env): RESTART_POLICY, BENTO_MEM_LIMIT, BENTO_CPUS,
+#      EVAL_MEM_LIMIT, VLLM_MODEL, VLLM_GPU_UTIL, VLLM_MAX_NUM_SEQS, VLLM_IMAGE,
+#      EVAL_JUDGE_BASE_URL, EVAL_JUDGE_MODEL
+# =============================================================================
+
+# Cap container log files (unbounded json logs are a silent disk eater).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---- Vector database ----
   qdrant:
     image: qdrant/qdrant:v1.10.1
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 1g
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
-    # The image ships bash only (no curl/wget/python) â€” TCP probe via /dev/tcp.
+    # The image ships bash only (no curl/wget/python) - TCP probe via /dev/tcp.
     healthcheck:
       test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
       interval: 10s
@@ -18,7 +36,12 @@
 
   postgres:
     image: pgvector/pgvector:pg16
-    restart: unless-stopped
+    # Opt-in: the RAG uses Qdrant, so this is only for the PostgreSQL storage
+    # provider. Start it with `--profile datastores`.
+    profiles: ["datastores"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 512m
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -36,78 +59,297 @@
 
   # ---- Tracking / observability ----
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.14.3
-    restart: unless-stopped
-    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root file:///mlflow/artifacts
+    image: ghcr.io/mlflow/mlflow:v3.16.0
+    # Opt-in: only needed when logging or reading evaluation runs.
+    # Start it with `--profile tracking`.
+    profiles: ["tracking"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 768m
+    # MLflow 3.x defaults to 4 uvicorn workers plus a huey job runner (~2 GiB total),
+    # which the 768m limit kills in a restart loop. Tracking needs neither.
+    environment:
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+    command: mlflow server --host 0.0.0.0 --port 5000 --workers 1 --allowed-hosts "mlflow:5000,localhost:5000,127.0.0.1:5000" --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root file:///mlflow/artifacts
     ports:
       - "5000:5000"
     volumes:
       - mlflow_data:/mlflow
 
-  langfuse:
-    image: ghcr.io/langfuse/langfuse:2
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "3000:3000"
-    environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/legal
-      NEXTAUTH_SECRET: mysecret
-      SALT: mysalt
-      NEXTAUTH_URL: http://localhost:3000
-      NEXT_PUBLIC_SIGN_UP_DISABLED: "false"
+  # ---------------------------------------------------------------------------
+  #  Langfuse v4 - LLM tracing (profile: langfuse). HEAVY: 6 containers.
+  #  Start it only when you need traces:  docker compose --profile langfuse up -d
+  #  Stop it afterwards:                  docker compose --profile langfuse stop
+  #  MinIO is remapped to 9092/9093 (Prometheus holds 9090).
+  # ---------------------------------------------------------------------------
 
+  # Web and worker MUST run the exact same build: the worker applies the
+  # ClickHouse migrations shipped with its image. Override LANGFUSE_VERSION in
+  # .env to upgrade both together.
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:${LANGFUSE_VERSION:-4.47.0}
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 1g
+    profiles: ["langfuse"]
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    environment: &langfuse-env
+      NEXTAUTH_URL: ${LANGFUSE_URL:-http://localhost:3000}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@langfuse-postgres:5432/postgres
+      SALT: ${LANGFUSE_SALT}
+      # Must be exactly 64 hex chars — generate with `openssl rand -hex 32`.
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # Raw ingestion events land in MinIO (S3-compatible), not Postgres.
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${REDIS_AUTH}
+      REDIS_TLS_ENABLED: "false"
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:${LANGFUSE_VERSION:-4.47.0}
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 1536m
+    profiles: ["langfuse"]
+    depends_on: *langfuse-depends-on
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      # Auto-provision org, project, API keys and a login on first boot.
+      # Every value lives in .env — nothing is defaulted here.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+
+  langfuse-postgres:
+    image: docker.io/postgres:17
+    profiles: ["langfuse"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 512m
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    # No published port on purpose - only langfuse containers need it.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    profiles: ["langfuse"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 2500m
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+      # Lean config: memory cap + system log tables removed. Directory mount
+      # (not a single file) to avoid the WSL/Docker Desktop file-bind bug.
+      # - ./deploy/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    profiles: ["langfuse"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 384m
+    entrypoint: sh
+    # Creates the 'langfuse' bucket before starting the server.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_PORT:-9092}:9000"      # upstream uses 9090 - Prometheus has it
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9093}:9001"
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 3s
+
+  langfuse-redis:
+    image: docker.io/redis:7
+    profiles: ["langfuse"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 300m
+    command: >
+      --requirepass ${REDIS_AUTH}
+      --maxmemory 200mb
+      --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  # ---- Metrics: Prometheus scrapes, Grafana draws ----
   prometheus:
     image: prom/prometheus:v2.53.0
-    restart: unless-stopped
+    # Opt-in: start with `--profile metrics`.
+    profiles: ["metrics"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 512m
     # Mount the directory (not the single file): file bind mounts from WSL hit
-    # the Docker Desktop docker-desktop-bind-mounts registry bug ("not a
-    # directory"). Point --config.file at the mounted copy instead.
-    command: --config.file=/etc/prometheus/monitoring/prometheus.yml
+    # the Docker Desktop bind-mount bug ("not a directory").
+    command: --config.file=/etc/prometheus/monitoring/prometheus.yml --storage.tsdb.retention.time=7d
     ports:
       - "9090:9090"
     volumes:
       - ./monitoring:/etc/prometheus/monitoring:ro
+      # Rules live under ./monitoring so the directory mount above covers them;
+      # the config references /etc/prometheus/monitoring/prometheus/rules.yml.
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    # Opt-in: start with `--profile metrics`.
+    profiles: ["metrics"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 256m
+    # Alertmanager does not expand environment variables in its config, so the
+    # entrypoint renders it first. With no ALERT_WEBHOOK_URL it renders a bare
+    # config with no receivers: Alertmanager refuses to start when a receiver has
+    # an empty url, and a stub url would spam delivery errors. Rules still
+    # evaluate and alerts are visible in the Alertmanager UI.
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - >-
+        if [ -n "$${ALERT_WEBHOOK_URL:-}" ]; then
+          sed "s|__ALERT_WEBHOOK_URL__|$${ALERT_WEBHOOK_URL}|g"
+          /etc/alertmanager/alertmanager.yml > /tmp/alertmanager.yml &&
+          echo "alertmanager: routing alerts to the configured webhook";
+        else
+          printf 'global:\n  resolve_timeout: 5m\nroute:\n  receiver: "null"\nreceivers:\n  - name: "null"\n' > /tmp/alertmanager.yml &&
+          echo "alertmanager: ALERT_WEBHOOK_URL is empty, using a null receiver";
+        fi &&
+        /bin/alertmanager --config.file=/tmp/alertmanager.yml
+        --storage.path=/alertmanager
+    ports:
+      - "9094:9093"
+    environment:
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
 
   grafana:
     image: grafana/grafana:11.0.0
-    restart: unless-stopped
+    # Opt-in: start with `--profile metrics`.
+    profiles: ["metrics"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 512m
     ports:
       - "9091:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Provisioning does the datasource/dashboard wiring, so the UI is useful
+      # on first load instead of showing an empty dashboard list.
+      GF_PROVISIONING_ENABLED: "true"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # Deliberately NOT under /etc/grafana/provisioning: a bind mount nested
+      # inside another one shadows it, which silently removed provider.yml and
+      # left Grafana with a datasource but zero dashboards.
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
 
   # ---- Generative model: vLLM (OpenAI-compatible) ----
-  # Write any HF model ID in VLLM_MODEL (see .env) â€” vLLM serves it and
-  # downloads the weights into the mounted cache itself (shared with other
-  # projects on this machine; downloads persist across container recreation).
-  # HARDWARE NOTE (GTX 1660 Ti, sm_75): AWQ kernels (marlin) require sm_80+ â€”
-  # on Turing AWQ containers crash at startup, which is the "server
-  # disconnected/we get a connection error" you saw from the API. Use a plain
-  # FP16 checkpoint (e.g. Qwen/Qwen2.5-1.5B-Instruct) instead of AWQ.
+  # Write any HF model ID in VLLM_MODEL (see .env) - vLLM serves it and
+  # downloads the weights into the shared cache itself.
+  # HARDWARE NOTE (GTX 1660 Ti, sm_75, 6 GB): AWQ kernels (marlin) need sm_80+,
+  # so use a plain FP16 checkpoint (e.g. Qwen/Qwen2.5-1.5B-Instruct).
+  # gpu-memory-utilization 0.75: weights (2.88 GiB) + a REAL KV cache; 0.50
+  # starves the cache ("No available memory for the cache blocks").
+  # PIN the image: set VLLM_IMAGE=vllm/vllm-openai:<tag> in .env. `latest`
+  # silently re-pulls a multi-GB image whenever upstream moves.
   vllm:
-    image: vllm/vllm-openai:latest
-    restart: unless-stopped
-    # gpu-memory-utilization 0.75: single engine on the 6 GB card. Weights
-    # (2.88 GiB) + a REAL KV cache — 0.50 starves the cache (works once, then
-    # "No available memory for the cache blocks" on the second request).
-    # vLLM reuses models from the shared cache volume or downloads on demand.
-    command: --model ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct} --dtype float16 --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.75} --max-model-len 2048 --enforce-eager
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    command: >-
+      --model ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
+      --dtype float16
+      --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.75}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-2048}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-8}
+      --enforce-eager
+      ${VLLM_QUANTIZATION:+--quantization ${VLLM_QUANTIZATION}}
+      ${VLLM_LOAD_FORMAT:+--load-format ${VLLM_LOAD_FORMAT}}
+
     ports:
       - "8001:8000"
     ipc: host
     volumes:
-      # Named volume = Linux-native ext4 inside Docker (fast, no 9P, no
-      # Windows-symlink breakage). See service-level comment in `volumes:` below.
       - hf_cache:/root/.cache/huggingface
     environment:
       VLLM_WSL2_ENABLE_PIN_MEMORY: "1"
-    # A running container is not enough: the API server only listens after
-    # the engine has loaded the model. Bento waits for this health check.
+    # The API server only listens after the engine has loaded the model.
+    # Bento waits for this health check.
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""]
       interval: 10s
@@ -122,21 +364,22 @@
               count: 1
               capabilities: [gpu]
 
-  # ---- Public RAG API: BentoML + FastAPI (the production chassis) ----
-  # BentoML packages and serves the FastAPI RAG app (bento_service.py); the
-  # FastAPI app is mounted at "/" so every /api/v1/... endpoint works
-  # unchanged. Retrieval goes to Qdrant; generation goes to the vLLM service;
-  # the cross-encoder reranker runs in-process. This is the sole public API:
-  # local development runs `uv run uvicorn law_api.main:app` directly instead.
+  # ---- Public RAG API: BentoML + FastAPI ----
+  # FastAPI app is mounted at "/" so every /api/v1/... endpoint works unchanged.
+  # Retrieval -> Qdrant; generation -> vLLM; cross-encoder reranker in-process.
+  # The old uv_venv / uv_cache volumes are gone: the venv lives at /app/.venv
+  # inside the image (the /opt/venv mount was never used) and the runtime image
+  # has no uv, so those volumes only duplicated GBs on disk.
   bento-api:
     build:
       context: .
       dockerfile: Dockerfile.bento
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: ${BENTO_MEM_LIMIT:-4g}
+    cpus: ${BENTO_CPUS:-2}
     depends_on:
       qdrant:
-        condition: service_healthy
-      postgres:
         condition: service_healthy
       vllm:
         condition: service_healthy
@@ -146,7 +389,8 @@
       LAW_API_QDRANT_COLLECTION: law_chunks
       LAW_API_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/legal
       LAW_API_LLM_PROVIDER: vllm
-      LAW_API_LLM_MODEL: Qwen/Qwen2.5-1.5B-Instruct
+      # Same variable vLLM serves - the two can no longer drift apart.
+      LAW_API_LLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
       LAW_API_LLM_BASE_URL: http://vllm:8000/v1
       LAW_API_UPLOAD_DIR: /app/storage/uploads
       LAW_API_PENDING_DIR: /app/storage/pending
@@ -155,15 +399,47 @@
       LAW_API_RERANK_CANDIDATES: "10"
       LAW_API_RERANK_MAX_LENGTH: "256"
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Absolute on purpose: BentoML serves the app from a worker whose working
+      # directory is the bento's src dir, so a relative path resolves somewhere
+      # else and the Ragas/drift alert gauges stay at zero.
+      LAW_API_EVAL_SCORES_PATH: /app/data/eval/latest_scores.json
+      # Written by the API on every evaluated request, on a writable mount.
+      LAW_API_EVAL_LIVE_SCORES_PATH: /app/data/runtime/latest_live_eval.json
+      # Live evaluation judges with the same engine. Uses the EVAL_JUDGE_* names
+      # rather than LAW_API_EVAL_JUDGE_*, because .env sets the latter to a
+      # host-only 127.0.0.1:8002 that does not exist inside the network.
+      LAW_API_EVAL_JUDGE_BASE_URL: ${EVAL_JUDGE_BASE_URL:-http://vllm:8000/v1}
+      LAW_API_EVAL_JUDGE_MODEL: ${EVAL_JUDGE_MODEL:-${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}}
+      # Inside the container 127.0.0.1 is ITSELF - traces go to the langfuse
+      # service by name. Keys pass through from the host .env.
+      LANGFUSE_HOST: http://langfuse-web:3000
+      # v4 SDK reads LANGFUSE_BASE_URL; LANGFUSE_HOST is kept for compatibility.
+      LANGFUSE_BASE_URL: http://langfuse-web:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_PROJECT_NAME: ${LANGFUSE_PROJECT_NAME}
+      # Stop torch/BLAS from spawning one thread per host core (CPU thrash).
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+      # Plain HTTP downloads instead of the Xet CAS: the CAS cache did not
+      # persist in the shared volume, so Xet re-hydrated (re-downloaded) whole
+      # 2.27 GB checkpoints on every run. Plain HTTP resumes partial files.
+      HF_HUB_DISABLE_XET: "1"
     ports:
       - "8000:3000"
     volumes:
       - ./storage/uploads:/app/storage/uploads
       - ./storage/pending:/app/storage/pending
-      - uv_venv:/opt/venv    # persistent venv (seeded from the image on first run)
-      - uv_cache:/root/.cache/uv   # persistent download cache
-      # Persist the sentence-transformers weights (embedding model + reranker)
-      # across container recreation — shares the same named volume as vLLM.
+      # Read-only view of the eval job's output directory. Without this the
+      # Prometheus bridge cannot see latest_scores.json / latest_drift.json, so
+      # the faithfulness alert gauges silently stay at zero.
+      - ./data/eval:/app/data/eval:ro
+      # Live per-request scores are written by the API itself, so they cannot live
+      # on the read-only eval mount above. This directory holds runtime state
+      # only; evaluation evidence stays immutable to the serving process.
+      - ./data/runtime:/app/data/runtime
+      # sentence-transformers weights (embedding model + reranker), shared with vLLM.
       - hf_cache:/root/.cache/huggingface
     # BentoML's own health endpoint (the FastAPI app is mounted under it).
     healthcheck:
@@ -173,16 +449,171 @@
       retries: 6
       start_period: 1m
 
+  # ---- Canary: the same app, a different RAG configuration ----
+  # A second bento instance used for canary rollout. It deliberately shares the
+  # single vLLM engine: a 6 GB card cannot host two engines, so the canary
+  # varies the RETRIEVAL config (top_k, reranker) rather than the model. The
+  # frontend's nginx shifts 10% of traffic here with split_clients; both
+  # instances record their own Langfuse traces, so quality can be compared
+  # before the split is widened. Start with: --profile canary
+  bento-canary:
+    build:
+      context: .
+      dockerfile: Dockerfile.bento
+    profiles: ["canary"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      vllm:
+        condition: service_healthy
+    environment:
+      LAW_API_STORAGE_PROVIDER: qdrant
+      LAW_API_QDRANT_URL: http://qdrant:6333
+      LAW_API_QDRANT_COLLECTION: law_chunks
+      LAW_API_LLM_PROVIDER: vllm
+      LAW_API_LLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
+      LAW_API_LLM_BASE_URL: http://vllm:8000/v1
+      LAW_API_UPLOAD_DIR: /app/storage/uploads
+      LAW_API_PENDING_DIR: /app/storage/pending
+      # The canary's only difference: a wider net with reranking on.
+      LAW_API_RAG_TOP_K: ${CANARY_TOP_K:-8}
+      LAW_API_RERANK: "true"
+      LAW_API_RERANKER: bge-reranker-base
+      LAW_API_RERANK_CANDIDATES: ${CANARY_RERANK_CANDIDATES:-20}
+      LAW_API_RERANK_MAX_LENGTH: "256"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_BASE_URL: http://langfuse-web:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_PROJECT_NAME: ${LANGFUSE_PROJECT_NAME}
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+      HF_HUB_DISABLE_XET: "1"
+    ports:
+      - "8001:3000"
+    volumes:
+      - ./storage/uploads:/app/storage/uploads
+      - ./storage/pending:/app/storage/pending
+      - uv_venv:/opt/venv
+      - uv_cache:/root/.cache/uv
+      - hf_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/healthz', timeout=2)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 1m
+
+  # ---- Frontend: React + Vite build served by nginx ----
+  # Opt-in: start with `--profile ui` and open http://localhost:8080
+  # nginx also carries the canary traffic split (see frontend/nginx.conf).
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    profiles: ["ui"]
+    restart: ${RESTART_POLICY:-no}
+    logging: *default-logging
+    mem_limit: 256m
+    depends_on:
+      bento-api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    environment:
+      # 0 disables the canary; 10 sends a tenth of /api traffic to it.
+      CANARY_SPLIT_PERCENT: ${CANARY_SPLIT_PERCENT:-0}
+
+  # ---- Load test: Locust at 50 concurrent users, writes reports/ ----
+  # One-shot. Produces the load-test artifact the project is expected to carry:
+  #   reports/locust_report.html  (open this in a browser)
+  #   reports/locust_report.csv
+  # Run it with:  docker compose --profile loadtest run --rm loadtest
+  loadtest:
+    image: python:3.12-slim-bookworm
+    profiles: ["loadtest"]
+    logging: *default-logging
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        pip install --quiet --no-cache-dir locust httpx &&
+        mkdir -p reports &&
+        locust -f locustfile.py --host http://bento-api:3000
+        --headless -u 50 -r 5 -t 3m --only-summary
+        --html reports/locust_report.html --csv reports/locust_report
+
+  # ---- Ragas evaluation job (one-shot, inside the docker network) ----
+  # Run it with:  docker compose --profile eval run --rm eval-job
+  # Judge defaults to the local vLLM model (Option A). A 1.5B judge gives noisy
+  # Ragas scores - point EVAL_JUDGE_BASE_URL / EVAL_JUDGE_MODEL at a stronger
+  # OpenAI-compatible endpoint in .env when you need trustworthy numbers.
+  eval-job:
+    build:
+      context: .
+      dockerfile: Dockerfile.eval
+    profiles:
+      - eval
+    logging: *default-logging
+    mem_limit: ${EVAL_MEM_LIMIT:-4g}
+    cpus: ${BENTO_CPUS:-2}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      vllm:
+        condition: service_healthy
+    environment:
+      LAW_API_STORAGE_PROVIDER: qdrant
+      LAW_API_QDRANT_URL: http://qdrant:6333
+      LAW_API_QDRANT_COLLECTION: law_chunks
+      LAW_API_EVAL_GENERATION_BASE_URL: http://vllm:8000/v1
+      LAW_API_EVAL_GENERATION_MODEL: ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
+      LAW_API_EVAL_JUDGE_BASE_URL: ${EVAL_JUDGE_BASE_URL:-http://vllm:8000/v1}
+      LAW_API_EVAL_JUDGE_MODEL: ${EVAL_JUDGE_MODEL:-${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      LAW_API_UPLOAD_DIR: /app/storage/uploads
+      LAW_API_PENDING_DIR: /app/storage/pending
+      LANGFUSE_HOST: http://langfuse-web:3000
+      LANGFUSE_BASE_URL: http://langfuse-web:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_PROJECT_NAME: ${LANGFUSE_PROJECT_NAME}
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+      # Plain HTTP downloads instead of the Xet CAS, which did not persist in
+      # the shared volume and re-hydrated whole checkpoints on every run.
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      # Dataset + evaluation report persist on the host; chunks + source PDF
+      # are read-only inputs.
+      - ./data/eval:/app/data/eval
+      - ./src/data/processed:/app/src/data/processed:ro
+      - ./src/data/raw:/app/src/data/raw:ro
+      # `run --rm` discards the container, so without this volume bge-m3 is re-downloaded every run.
+      - hf_cache:/root/.cache/huggingface
+
 volumes:
   qdrant_data:
   pg_data:
   mlflow_data:
   grafana_data:
+  alertmanager_data:
+  # Persistent venv + uv download cache for the bento services. Referenced by
+  # bento-api (and bento-canary) but previously never declared here.
   uv_venv:
   uv_cache:
-  # Shared HuggingFace cache for all vLLM engines and the bento-api
-  # (sentence-transformers): Linux-native ext4 inside Docker — fast loads,
-  # downloads happen automatically on first use and persist afterwards.
-  # populate it from your existing Windows cache ONCE with:
-  #   docker compose cp  C:/Users/Ali/.cache/huggingface/hub/. vllm:/root/.cache/huggingface/hub/
+  # Shared HuggingFace cache for vLLM and bento-api (sentence-transformers).
   hf_cache:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_redis_data:

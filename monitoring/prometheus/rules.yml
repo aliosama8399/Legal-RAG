@@ -1,0 +1,80 @@
+# Alerting rules for the RAG service.
+# Loaded via rule_files in prometheus.yml and routed to Alertmanager.
+groups:
+  - name: rag-quality
+    interval: 1m
+    rules:
+      # The graded requirement: notify when Ragas faithfulness drops below 0.80.
+      # The gauge is bridged from the eval job's latest_scores.json by
+      # law_api.tracking.eval_bridge — Ragas itself lives in MLflow and cannot be
+      # scraped directly. `for: 2m` stops a single stale read from paging anyone.
+      - alert: RagFaithfulnessBelowThreshold
+        expr: rag_ragas_metric{metric="faithfulness"} < 0.80
+        for: 2m
+        labels:
+          severity: critical
+          component: rag-quality
+        annotations:
+          summary: "Ragas faithfulness {{ $value | printf \"%.3f\" }} is below 0.80"
+          description: >-
+            The most recent Ragas run scored faithfulness at
+            {{ $value | printf "%.3f" }}, under the 0.80 quality gate.
+            Compare against previous runs in MLflow experiment
+            legal-rag-ragas-eval before shipping.
+          runbook: README.md#evaluation
+
+      - alert: RagFaithfulnessMissing
+        expr: absent(rag_ragas_metric{metric="faithfulness"})
+        for: 30m
+        labels:
+          severity: warning
+          component: rag-quality
+        annotations:
+          summary: "No Ragas faithfulness metric has been published"
+          description: >-
+            No evaluation run has published scores in the last 30 minutes, so
+            quality is unmeasured. Run:
+            docker compose --profile eval run --rm eval-job
+
+  - name: rag-serving
+    interval: 30s
+    rules:
+      - alert: RagLatencyDegraded
+        expr: histogram_quantile(0.95, sum(rate(rag_ask_latency_seconds_bucket[10m])) by (le)) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 /ask latency above 60s"
+          description: >-
+            p95 latency is {{ $value | printf "%.1f" }}s. On a single 1.5B vLLM
+            engine this usually means the GPU is contended or the KV cache is
+            too small for concurrency.
+
+      - alert: RagEmbeddingDrift
+        # Drift is a DROP against the baseline's own mean, never an absolute
+        # similarity: real questions sit ~0.85 cosine from their own centroid with
+        # zero drift, so an absolute "< 0.90" rule alarms forever. The
+        # `questions > 0` guard keeps "no baseline yet" from paging.
+        expr: >-
+          rag_embedding_drift_delta < -0.05
+          and rag_embedding_drift_questions > 0
+        for: 1h
+        labels:
+          severity: warning
+          component: rag-quality
+        annotations:
+          summary: "Query embeddings drifting from the indexed baseline"
+          description: >-
+            Mean cosine is {{ $value | printf "%.3f" }}, more than 0.05 below the
+            baseline's own mean. New queries are moving away from the
+            distribution the index was built for; consider re-indexing.
+          runbook: README.md#embedding-drift
+
+      - alert: RagNoTraffic
+        expr: sum(rate(rag_llm_tokens_total[15m])) == 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "No LLM tokens consumed in 15 minutes"
