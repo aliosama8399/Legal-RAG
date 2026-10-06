@@ -118,6 +118,27 @@ class LangfuseTracker:
         if client is None:
             yield None
             return
+
+        # BentoML's ASGI server sets an unsampled parent span (sampled=0) on incoming
+        # requests. OpenTelemetry would drop child spans created under an unsampled parent.
+        # If the active span is non-recording, detach it so Langfuse starts a recording root trace.
+        clean_token = None
+        try:
+            from opentelemetry import context as otel_context
+            from opentelemetry import trace as otel_trace
+
+            current_span = otel_trace.get_current_span()
+            if (
+                current_span
+                and not current_span.is_recording()
+                and current_span != otel_trace.INVALID_SPAN
+            ):
+                clean_token = otel_context.attach(
+                    otel_trace.set_span_in_context(otel_trace.INVALID_SPAN)
+                )
+        except Exception:
+            clean_token = None
+
         try:
             kwargs = self._observation_kwargs(name, as_type, attributes)
             span = client.start_as_current_observation(**kwargs)
@@ -128,6 +149,11 @@ class LangfuseTracker:
             if "trace-open" not in self._warned_keys:
                 self._warned_keys.add("trace-open")
                 print(f"langfuse: could not open span '{name}' ({error}) - tracing degraded")
+            if clean_token is not None:
+                try:
+                    otel_context.detach(clean_token)
+                except Exception:
+                    pass
             yield None
             return
         try:
@@ -143,6 +169,12 @@ class LangfuseTracker:
                 span.__exit__(None, None, None)
             except Exception:
                 pass
+        finally:
+            if clean_token is not None:
+                try:
+                    otel_context.detach(clean_token)
+                except Exception:
+                    pass
 
     def flush(self) -> None:
         if self._client is not None:
