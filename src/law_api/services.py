@@ -309,6 +309,7 @@ class RAGQueryService:
             except Exception:
                 # Scoring is best-effort; never fail a served request over it.
                 pass
+        self._flush()
 
     def _guard_answer(self, answer: str) -> tuple[str, dict[str, int]]:
         """Run the PII guardrail over a completed answer.

@@ -13,7 +13,7 @@ def _usage_from(response) -> dict[str, int]:
     if usage is None and isinstance(response, dict):
         usage = response.get("usage")
     if usage is None:
-        return {"prompt": 0, "completion": 0}
+        usage = response
 
     def read(*names: str) -> int:
         for name in names:
