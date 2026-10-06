@@ -76,6 +76,7 @@ def _log_mlflow(metrics: dict, extra_params: dict | None = None) -> None:
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
         mlflow.set_experiment(settings.mlflow_experiment)
         with mlflow.start_run(run_name=f"chunks-{extra_params['chunk_label']}"):
+            mlflow.set_tag("eval_phase", "chunks")
             mlflow.log_params({"embedding_model": metrics["embedding_model"], **extra_params})
             mlflow.log_metrics(
                 {key: value for key, value in metrics.items() if isinstance(value, (int, float))}

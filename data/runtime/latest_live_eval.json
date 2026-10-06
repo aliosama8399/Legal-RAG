@@ -1,0 +1,18 @@
+{
+  "hit_at_k": 1.0,
+  "reciprocal_rank": 1.0,
+  "retrieved_ranks": [
+    1,
+    2,
+    3
+  ],
+  "faithfulness": 1.0,
+  "answer_relevancy": 0.0,
+  "judge_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "duration_seconds": 5.684,
+  "question_preview": "",
+  "embedding_model": "Omartificial-Intelligence-Space/Arabert-all-nli-triplet-Matryoshka",
+  "generation_model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "top_k": null,
+  "written_at": "2026-10-06T17:21:58.720665+00:00"
+}

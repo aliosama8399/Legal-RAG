@@ -43,7 +43,7 @@ class Settings:
     qdrant_path: Path = Path(_env_or_yaml("LAW_API_QDRANT_PATH", "storage", "qdrant", "path", default="storage/qdrant"))
     qdrant_collection: str = _env_or_yaml("LAW_API_QDRANT_COLLECTION", "storage", "qdrant", "collection", default="law_chunks")
     embedding_name: str = _env_or_yaml("LAW_API_EMBEDDING", "embedding", "name", default="bge-m3")
-    mlflow_tracking_uri: str = _env_or_yaml("MLFLOW_TRACKING_URI", "mlflow", "tracking_uri", default="http://127.0.0.1:5001")
+    mlflow_tracking_uri: str = _env_or_yaml("MLFLOW_TRACKING_URI", "mlflow", "tracking_uri", default="http://127.0.0.1:5000")
     mlflow_experiment: str = _env_or_yaml("MLFLOW_EXPERIMENT", "mlflow", "experiment", default="legal-rag-embeddings")
     llm_provider: str = _env_or_yaml("LAW_API_LLM_PROVIDER", "llm", "provider", default="openai")
     llm_model: str = _env_or_yaml("LAW_API_LLM_MODEL", "llm", "model", default="gpt-4o-mini")
@@ -76,6 +76,40 @@ class Settings:
     langfuse_host: str = _env_or_yaml("LANGFUSE_HOST", "langfuse", "host", default="http://127.0.0.1:3000")
     langfuse_public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
     langfuse_secret_key: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+    # Where the eval job drops the newest Ragas scores so the Prometheus alert
+    # rule has a metric to fire on.
+    #
+    # A relative path is resolved against PROJECT_ROOT, never the process CWD:
+    # BentoML serves the app from a worker whose cwd is the bento's src
+    # directory, so a bare "data/eval/..." silently pointed at a directory that
+    # does not exist and the alert gauges stayed at zero.
+    _eval_scores = Path(
+        _env_or_yaml(
+            "LAW_API_EVAL_SCORES_PATH",
+            "eval",
+            "scores_path",
+            default="data/eval/latest_scores.json",
+        )
+    )
+    eval_scores_path: Path = (
+        _eval_scores if _eval_scores.is_absolute() else PROJECT_ROOT / _eval_scores
+    )
+    # Live (per-request) evaluation scores are written here by the serving app
+    # and republished by the metrics bridge, so the Grafana panels keep their
+    # last value across a restart instead of resetting to zero.
+    _eval_live = Path(
+        _env_or_yaml(
+            "LAW_API_EVAL_LIVE_SCORES_PATH",
+            "eval",
+            "live_scores_path",
+            default="data/eval/latest_live_eval.json",
+        )
+    )
+    eval_live_scores_path: Path = (
+        _eval_live if _eval_live.is_absolute() else PROJECT_ROOT / _eval_live
+    )
+    # Keys are project-scoped; when set, tracing is refused if the keys belong to another project.
+    langfuse_project_name: str = os.getenv("LANGFUSE_PROJECT_NAME", "")
 
 
 settings = Settings()

@@ -37,3 +37,18 @@ paths:
   pending_dir: storage/pending
   max_upload_bytes: 52428800
 
+evaluation:
+  # The GENERATION model is the model being evaluated; it also serves /ask.
+  generation_base_url: http://vllm:8000/v1
+  generation_model: Qwen/Qwen2.5-1.5B-Instruct
+  # The judge only scores answers during Ragas evaluation. On a 6 GB GPU it has
+  # to be the same engine as generation: a second vLLM will not fit.
+  judge_base_url: http://vllm:8000/v1
+  judge_model: Qwen/Qwen2.5-1.5B-Instruct
+  # Where the eval job writes the newest Ragas scores. Read (read-only mount) by
+  # the API so Prometheus can alert on it.
+  scores_path: data/eval/latest_scores.json
+  # Live per-request scores, written by the API itself. Deliberately NOT in
+  # data/eval: that directory is mounted read-only into the serving container.
+  live_scores_path: data/runtime/latest_live_eval.json
+

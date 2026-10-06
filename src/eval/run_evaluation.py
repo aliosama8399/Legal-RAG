@@ -20,9 +20,11 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from law_api.config import settings
+
 from .chunk_sweep import _configs, run_sweep as run_chunk_sweep
 from .dataset import DATASET_PATH, curate, generate_questions
-from .ragas_eval import run_ragas_eval
+from .ragas_eval import METRIC_NAMES, run_ragas_eval
 from .retrieval_eval import evaluate_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -42,8 +44,12 @@ def _write_report(
         "",
         f"Generated: {datetime.now(UTC).isoformat()}",
         "",
-        f"- Generation model (evaluated): `{params['generation_model']}`",
-        f"- Judge model (scoring only): `{params['judge_model']}`",
+        f"- Generation model (evaluated): `{params.get('generation_model', 'not evaluated')}`",
+        f"- Judge model (scoring only): `{params.get('judge_model', 'not evaluated')}`",
+        # The requirement is "RAGAS on >= 50 questions", so the count has to be
+        # written down here. It was previously only in MLflow params, which made
+        # the claim unverifiable from the repository.
+        f"- Questions evaluated: **{params.get('questions', 0)}**",
         "",
     ]
 
@@ -78,7 +84,14 @@ def _write_report(
             "|---|---|",
         ]
         lines += [f"| {name} | {score:.4f} |" for name, score in sorted(ragas_scores.items())]
-        lines += [""]
+        lines += [
+            "",
+            "Every question above is also a trace in Langfuse (project "
+            f"`{settings.langfuse_project_name or 'Legal RAG'}`) with these scores "
+            "attached to the trace, so a regression can be traced back to the "
+            "exact retrieval and generation that produced it.",
+            "",
+        ]
 
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
@@ -101,6 +114,14 @@ def main() -> int:
     parser.add_argument("--per-article", type=int, default=2)
     parser.add_argument("--models", nargs="+", default=["gate-arabert-v1", "arabert-all-nli-triplet-matryoshka", "bge-m3"])
     parser.add_argument("--top-k", nargs="+", type=int, default=[1, 3, 5, 10])
+    parser.add_argument(
+        "--ragas-metrics",
+        nargs="+",
+        default=None,
+        choices=list(METRIC_NAMES),
+        help="Ragas metrics for the final stage (default: faithfulness + answer_relevancy)",
+    )
+    parser.add_argument("--limit", type=int, default=0, help="Only evaluate the first N questions (quick test)")
     args = parser.parse_args()
 
     # ---- Phase 1: dataset ----
@@ -118,6 +139,8 @@ def main() -> int:
         print(f"dataset: {len(curated)} curated questions")
 
     dataset = _load_jsonl(DATASET_PATH)
+    if args.limit:
+        dataset = dataset[: args.limit]
     if not dataset:
         print("dataset is empty — cannot evaluate")
         return 1
@@ -144,6 +167,7 @@ def main() -> int:
             print("retrieval: chunks file missing — skipping")
 
     # ---- Phase 3: chunk size sweep ----
+    articles = None
     if not args.skip_chunks and args.pdf.is_file():
         from data.prepare_law import _article_records
 
@@ -153,7 +177,26 @@ def main() -> int:
         print(f"chunks: {len(configs)} configurations ...")
         chunk_results = asyncio.run(run_chunk_sweep(dataset, articles, "bge-m3", 5, configs))
 
-    # ---- Phase 4: ragas ----
+    # ---- Phase 4: ragas (uses the BEST chunk config from the sweep) ----
+    ragas_chunk_params: dict = {}
+    ragas_chunks = _load_jsonl(args.chunks)
+    if chunk_results:
+        best_chunk = max(chunk_results, key=lambda i: next(v for k, v in i.items() if k.startswith("mrr@")))
+        ragas_chunk_params = {
+            "chunk_label": best_chunk["chunk_label"],
+            "paragraphs_per_chunk": best_chunk.get("paragraphs_per_chunk", 1),
+            "chunk_chars": best_chunk.get("chunk_chars") or "",
+            "overlap_chars": best_chunk.get("overlap_chars", 0),
+        }
+        if articles is None:
+            from data.prepare_law import _article_records
+
+            articles = _article_records(args.pdf)
+        from data.prepare_law import build_chunks as _build
+
+        ragas_chunks = _build(articles, **{k: v for k, v in ragas_chunk_params.items() if k != "chunk_label" and v})
+        print(f"ragas: using best chunking from the sweep: {best_chunk['chunk_label']}")
+
     if not args.skip_ragas:
         print("ragas: evaluating the generation model (judge scores) ...")
         from .ragas_eval import _run_pipeline
@@ -161,10 +204,33 @@ def main() -> int:
         from law_api.config import settings as app_settings
 
         try:
+            from .ragas_eval import _langfuse_client
+
+            params = {
+                "generation_model": app_settings.eval_generation_model,
+                "judge_model": app_settings.eval_judge_model,
+                "embedding_model": app_settings.embedding_name,
+                "top_k": 5,
+                "questions": len(dataset),
+                **ragas_chunk_params,
+            }
+            # One client for generation tracing and for the scores afterwards.
+            langfuse = _langfuse_client()
             rows = asyncio.run(
-                _run_pipeline(dataset, _load_jsonl(args.chunks), app_settings.embedding_name, 5)
+                _run_pipeline(
+                    dataset,
+                    ragas_chunks,
+                    app_settings.embedding_name,
+                    5,
+                    langfuse_client=langfuse,
+                )
             )
-            ragas_scores = run_ragas_eval(rows)
+            ragas_scores = run_ragas_eval(
+                rows,
+                {**params, "questions": len(rows)},
+                client=langfuse,
+                metric_names=args.ragas_metrics,
+            )
         except Exception as error:
             print(f"ragas evaluation failed: {error}")
 

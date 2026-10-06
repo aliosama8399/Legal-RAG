@@ -1,0 +1,27 @@
+# Alertmanager routes the RAG alerts to a single webhook so the destination is
+# a one-line change: Slack, Discord, Teams and PagerDuty all accept a generic
+# incoming-webhook POST.
+route:
+  receiver: rag-webhook
+  group_by: [alertname, component]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Quality regressions page immediately; everything else waits to be batched.
+    - matchers:
+        - severity = critical
+      receiver: rag-webhook
+      repeat_interval: 1h
+
+receivers:
+  - name: rag-webhook
+    webhook_configs:
+      # Placeholder is substituted from $ALERT_WEBHOOK_URL at container start.
+      # Alertmanager does not expand environment variables in its config, so the
+      # compose entrypoint renders this file first. Leaving ALERT_WEBHOOK_URL
+      # empty keeps the rules fully evaluable — firing alerts are logged rather
+      # than posted — so the rules can be verified before picking a destination.
+      - url: __ALERT_WEBHOOK_URL__
+        send_resolved: true
+        max_alerts: 0

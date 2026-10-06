@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.7
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# Base deps plus the ragas/eval extra - cached layer, lockfile-driven.
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev --extra eval
+
+# Application + eval code + operational scripts + non-secret config.
+COPY src ./src
+COPY config ./config
+# scripts/ holds the drift, reindex, latency and quantization A/B tools; the
+# eval image needs them so they can run inside the docker network.
+COPY scripts ./scripts
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra eval
+
+FROM python:3.12-slim-bookworm AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TOKENIZERS_PARALLELISM=false \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+COPY --from=builder /app /app
+
+# One-shot evaluation job (not a persistent service): compose runs it with
+#   docker compose --profile eval run --rm eval-job
+CMD ["python", "-m", "eval.run_evaluation"]

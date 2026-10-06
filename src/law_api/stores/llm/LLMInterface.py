@@ -12,6 +12,10 @@ class LLMInterface(ABC):
 
     name: str
     model_id: str
+    # Token counts of the most recent generate()/generate_stream() call, as
+    # {"prompt": int, "completion": int}. Providers that cannot report usage
+    # leave it as None; callers must treat that as "unknown", not zero.
+    last_usage: dict[str, int] | None = None
 
     @abstractmethod
     async def generate(

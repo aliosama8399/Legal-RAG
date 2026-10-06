@@ -21,6 +21,10 @@ python:
     - "orjson"
     - "mlflow"
     - "bentoml"
+    # /metrics needs the client; the PII guardrail needs presidio + spacy.
+    - "prometheus-client"
+    - "presidio-analyzer"
+    - "spacy"
 docker:
   distro: debian
   python_version: "3.12"

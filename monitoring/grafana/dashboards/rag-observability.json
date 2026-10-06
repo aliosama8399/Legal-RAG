@@ -1,0 +1,568 @@
+{
+  "uid": "rag-observability",
+  "title": "Legal-RAG — observability",
+  "tags": [
+    "legal-rag",
+    "rag"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Ragas faithfulness (gate: 0.80)",
+      "description": "Most recent Ragas faithfulness, bridged from the eval job. This is the graded quality gate.",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_ragas_metric{metric=\"faithfulness\"}",
+          "legendFormat": "faithfulness"
+        }
+      ]
+    },
+    {
+      "type": "gauge",
+      "title": "Ragas metric",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_ragas_metric",
+          "legendFormat": "{{metric}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Questions in last Ragas run",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_ragas_questions"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Questions asked / hour",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqph"
+        },
+        "decimals": 1,
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(rag_requests_total{endpoint=\"ask\"}[1h])) * 3600"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "LLM calls / hour",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 22,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "decimals": 1,
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(rag_llm_calls_total[1h])) * 3600"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost per hour (USD)",
+      "description": "Derived from token throughput and the prices configured in tracking/prometheus_metrics.py. Prices default to 0 for a local vLLM engine, so this reads zero until you model a hosted provider.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(rag_llm_cost_usd_total[1h])) * 3600",
+          "legendFormat": "USD/hour"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Token throughput",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(rag_llm_tokens_total{direction=\"completion\"}[5m]))",
+          "legendFormat": "completion tok/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(rag_llm_tokens_total{direction=\"prompt\"}[5m]))",
+          "legendFormat": "prompt tok/s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "/ask latency p50 / p95",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(rag_ask_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(rag_ask_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Time to first token",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(rag_first_token_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "TTFT p50"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests by endpoint",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (endpoint, mode) (rate(rag_requests_total[5m]))",
+          "legendFormat": "{{endpoint}}/{{mode}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "PII redactions",
+      "description": "Guardrail activity on /ask responses, by detected entity type.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (entity_type) (rate(rag_pii_redactions_total[15m]))",
+          "legendFormat": "{{entity_type}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Embedding drift (delta vs baseline)",
+      "description": "Current mean cosine minus the baseline's own mean. Baseline questions sit ~0.85 cosine from their own centroid with zero drift, so only the drop is meaningful. The alert fires below -0.05 once a baseline exists.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 22
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": -0.3,
+          "max": 0.3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": -0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_embedding_drift_delta",
+          "legendFormat": "delta vs baseline"
+        },
+        {
+          "refId": "B",
+          "expr": "rag_embedding_drift_baseline_cosine",
+          "legendFormat": "baseline mean"
+        }
+      ],
+      "id": 30,
+      "legendFormat": ""
+    },
+    {
+      "type": "stat",
+      "title": "Live faithfulness (last request)",
+      "description": "Per-request judge score from `evaluate: true` on /ask. Empty until a request asks for live evaluation.",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_live_eval_score{metric=\"faithfulness\"}",
+          "legendFormat": "faithfulness"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Live retrieval hit@k (last request)",
+      "description": "Arithmetic, no judge call: did the gold article appear in the retrieved set? Empty until a request supplies expected_article.",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rag_live_eval_score{metric=\"hit_at_k\"}",
+          "legendFormat": "hit@k"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Live evaluation cost",
+      "description": "Wall-clock added to the request path by live evaluation. Non-zero only when evaluate=true.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(rag_live_eval_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(rag_live_eval_requests_total[5m])) * 60",
+          "legendFormat": "evals/min"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "API process uptime",
+      "description": "Every Prometheus counter in the serving container resets when it is recreated, so cumulative panels drop to zero on each rebuild. This panel shows when that last happened; the cumulative panels below are only comparable within one uptime window.",
+      "id": 31,
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 46
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dtdurations",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - process_start_time_seconds",
+          "legendFormat": "uptime"
+        }
+      ]
+    }
+  ]
+}

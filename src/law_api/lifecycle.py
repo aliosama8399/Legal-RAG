@@ -22,7 +22,12 @@ from .tracking.mlflow_tracker import MLflowTracker
 
 
 def _initialized(app: FastAPI) -> bool:
-    return hasattr(app.state, "rag_service")
+    # Deliberately a completion flag, not `hasattr(state, "rag_service")`. That
+    # attribute is assigned before the last initialization steps, so a failure
+    # late in the sequence left the app looking ready: the first request 500'd
+    # and every later request skipped initialization entirely (silently
+    # disabling the metrics bridge).
+    return getattr(app.state, "rag_ready", False)
 
 
 async def ensure_services(app: FastAPI) -> None:
@@ -75,7 +80,10 @@ async def initialize_services(
     state.reranker = reranker
     state.tracker = tracker
     state.langfuse_tracker = LangfuseTracker(
-        resolved.langfuse_host, resolved.langfuse_public_key, resolved.langfuse_secret_key
+        resolved.langfuse_host,
+        resolved.langfuse_public_key,
+        resolved.langfuse_secret_key,
+        resolved.langfuse_project_name,
     )
     state.ingestion_service = DocumentIngestionService(resolved, storage, embedder, tracker)
     state.rag_service = RAGQueryService(
@@ -84,7 +92,18 @@ async def initialize_services(
         langfuse=state.langfuse_tracker,
         reranker=reranker,
         rerank_candidates=resolved.rag_rerank_candidates,
+        # Live evaluation judges with the same endpoint the batch eval uses, so
+        # there is one judge to reason about rather than two.
+        eval_judge_base_url=resolved.eval_judge_base_url,
+        eval_judge_model=resolved.eval_judge_model,
+        # Absolute, like the scores path: BentoML's worker CWD is not /app.
+        live_eval_path=str(resolved.eval_live_scores_path),
     )
+    # Set last: everything above must have succeeded for the app to count as
+    # ready. The Ragas/drift gauges are NOT refreshed here — see
+    # tracking/eval_bridge.py for why a background task cannot survive under
+    # BentoML; /metrics republishes them synchronously on every scrape.
+    state.rag_ready = True
 
 
 async def shutdown_services(app: FastAPI) -> None:
