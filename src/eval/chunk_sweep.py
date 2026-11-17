@@ -15,11 +15,10 @@ import json
 from pathlib import Path
 
 from data.prepare_law import _article_records, build_chunks
-
 from law_api.config import settings
 
 from .dataset import DATASET_PATH, _load_jsonl
-from .retrieval_eval import evaluate_config, DEFAULT_CHUNKS
+from .retrieval_eval import evaluate_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PDF = PROJECT_ROOT / "src" / "data" / "raw" / "egyptian_civil_code.pdf"
@@ -79,7 +78,7 @@ def _log_mlflow(metrics: dict, extra_params: dict | None = None) -> None:
             mlflow.set_tag("eval_phase", "chunks")
             mlflow.log_params({"embedding_model": metrics["embedding_model"], **extra_params})
             mlflow.log_metrics(
-                {key: value for key, value in metrics.items() if isinstance(value, (int, float))}
+                {key: value for key, value in metrics.items() if isinstance(value, int | float)}
             )
     except Exception as error:
         print(f"mlflow logging failed (best-effort): {error}")

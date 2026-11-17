@@ -10,7 +10,7 @@ from .BaseController import BaseController
 
 
 class DataController(BaseController):
-    """Business logic for the document upload / embedding use cases."""
+    """Business logic for document upload, async ingestion, listing, and deletion."""
 
     def __init__(self, service: DocumentIngestionService, settings: Settings) -> None:
         super().__init__(settings)
@@ -28,12 +28,6 @@ class DataController(BaseController):
         return content
 
     def save_pdf(self, content: bytes) -> Path:
-        """Persist the uploaded PDF under its content hash.
-
-        Identical uploads reuse the same file instead of saving another
-        copy (repeated test uploads of the same law PDF previously created
-        a full duplicate each time).
-        """
         import hashlib
 
         digest = hashlib.sha256(content).hexdigest()
@@ -43,9 +37,13 @@ class DataController(BaseController):
             pdf_path.write_bytes(content)
         return pdf_path
 
-    async def upload_and_chunk(self, pdf_path: Path, filename: str) -> UploadResponse:
+    async def upload_and_chunk(
+        self, pdf_path: Path, filename: str, tenant_id: str = "org_default"
+    ) -> UploadResponse:
         try:
-            return UploadResponse(**(await self.service.upload_and_chunk(pdf_path, filename)))
+            return UploadResponse(
+                **(await self.service.upload_and_chunk(pdf_path, filename, tenant_id=tenant_id))
+            )
         except ValueError as error:
             pdf_path.unlink(missing_ok=True)
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -53,10 +51,20 @@ class DataController(BaseController):
             pdf_path.unlink(missing_ok=True)
             raise HTTPException(status_code=500, detail="Document processing failed") from error
 
-    async def embed_and_store(self, document_id: int) -> EmbedResponse:
+    async def embed_and_store(
+        self, document_id: int, tenant_id: str = "org_default"
+    ) -> EmbedResponse:
         try:
-            return EmbedResponse(**(await self.service.embed_and_store(document_id)))
+            return EmbedResponse(
+                **(await self.service.embed_and_store(document_id, tenant_id=tenant_id))
+            )
         except ValueError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except Exception as error:
             raise HTTPException(status_code=500, detail="Embedding failed") from error
+
+    async def list_documents(self, tenant_id: str = "org_default") -> list[dict]:
+        return await self.service.list_documents(tenant_id=tenant_id)
+
+    async def delete_document(self, document_id: int, tenant_id: str = "org_default") -> bool:
+        return await self.service.delete_document(document_id, tenant_id=tenant_id)

@@ -32,6 +32,8 @@ class LawChunk(BaseModel):
     chunk_id: str = Field(min_length=1)
     article_number: int = Field(ge=1)
     chunk_text: str
+    text_ar: str = ""
+    text_en: str = ""
     chunk_number: int = Field(ge=1)
     citation: str = Field(min_length=1)
     source_page: int = Field(ge=0)
@@ -46,6 +48,8 @@ class RetrievedDocument(BaseModel):
     chunk_id: str = Field(min_length=1)
     article_number: int = Field(ge=1)
     chunk_text: str
+    text_ar: str = ""
+    text_en: str = ""
     citation: str
     source_page: int = Field(ge=0)
     score: float

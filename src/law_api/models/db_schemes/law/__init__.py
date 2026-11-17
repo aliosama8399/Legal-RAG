@@ -1,3 +1,3 @@
 from .schemes import Base, LawChatHistory, LawChunkRecord, LawDocument
 
-__all__ = ["Base", "LawDocument", "LawChunkRecord", "LawChatHistory"]
+__all__ = ["Base", "LawChatHistory", "LawChunkRecord", "LawDocument"]

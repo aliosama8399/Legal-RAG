@@ -4,17 +4,27 @@ from .BaseController import BaseController
 
 
 class NLPController(BaseController):
-    """Business logic for retrieval and grounded-answer use cases."""
+    """Business logic for tenant-isolated retrieval, grounded answers, and multi-turn chat."""
 
     def __init__(self, service: RAGQueryService) -> None:
         super().__init__()
         self.service = service
 
-    async def search(self, request: AskRequest) -> SearchResponse:
-        results = await self.service.search(request.question, request.top_k, request.document_id)
+    async def search(
+        self, request: AskRequest, tenant_id: str = "org_default"
+    ) -> SearchResponse:
+        results = await self.service.search(
+            request.question, request.top_k, request.document_id, tenant_id=tenant_id
+        )
         return SearchResponse(query=request.question, results=results)
 
-    async def ask(self, request: AskRequest) -> AskResponse:
+    async def ask(
+        self,
+        request: AskRequest,
+        tenant_id: str = "org_default",
+        user_id: str = "usr_default",
+        request_id: str = "",
+    ) -> AskResponse:
         result = await self.service.ask(
             request.question,
             request.top_k,
@@ -22,11 +32,19 @@ class NLPController(BaseController):
             evaluate=request.evaluate,
             expected_article=request.expected_article,
             eval_metrics=request.eval_metrics,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            request_id=request_id,
         )
         return AskResponse(**result)
 
-    async def ask_stream(self, request: AskRequest):
-        """Async generator of SSE events from the service."""
+    async def ask_stream(
+        self,
+        request: AskRequest,
+        tenant_id: str = "org_default",
+        user_id: str = "usr_default",
+        request_id: str = "",
+    ):
         async for event in self.service.ask_stream(
             request.question,
             request.top_k,
@@ -34,9 +52,18 @@ class NLPController(BaseController):
             evaluate=request.evaluate,
             expected_article=request.expected_article,
             eval_metrics=request.eval_metrics,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            request_id=request_id,
         ):
             yield event
 
-
-    async def history(self, document_id: int | None = None, limit: int = 50) -> ChatHistoryResponse:
-        return ChatHistoryResponse(results=await self.service.history(document_id, limit))
+    async def history(
+        self,
+        document_id: int | None = None,
+        limit: int = 50,
+        tenant_id: str = "org_default",
+    ) -> ChatHistoryResponse:
+        return ChatHistoryResponse(
+            results=await self.service.history(document_id, limit, tenant_id=tenant_id)
+        )

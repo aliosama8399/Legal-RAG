@@ -1,64 +1,222 @@
-"""End-to-end test of the RAG pipeline (fake embedder + Qdrant local mode +
-extractive LLM), so no model download is required."""
+"""Unit & integration tests for Hybrid RAG retrieval, RRF fusion, and Mock LLM generation."""
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import ClassVar
 
+import pytest
 
-from legal_rag.rag import RAGPipeline
-from legal_rag.vectordb.base import Chunk
-from legal_rag.vectordb.qdrant import QdrantStore
-from legal_rag.llm.base import ExtractiveLLM
+from law_api.services import RAGQueryService, _bilingual_chunk_text, _fuse_rrf
+from law_api.stores.llm.providers import MockLLMProvider
+from law_api.stores.vectordb.providers.QdrantProvider import QdrantProvider
 
 
 class FakeEmbedder:
-    """Deterministic term-overlap embedding over a fixed vocabulary."""
-
-    dim = 8
-    _vocab = ["contract", "sale", "obligation", "lease", "servitude", "law", "الحق", "العقد"]
+    name = "fake-embedder"
+    model_id = "fake-embedder"
+    _vocab: ClassVar[list[str]] = [
+        "contract",
+        "sale",
+        "obligation",
+        "lease",
+        "servitude",
+        "law",
+        "nullity",
+        "damages",
+        "هبة",
+        "المستقبلة",
+        "gift",
+    ]
 
     def _feats(self, text: str) -> list[float]:
-        t = text.lower()
-        v = [float(t.count(w)) for w in self._vocab]
-        norm = sum(x * x for x in v) ** 0.5 or 1.0
-        return [x / norm for x in v]
+        lowered = text.lower()
+        vec = [float(lowered.count(w)) for w in self._vocab]
+        norm = sum(x * x for x in vec) ** 0.5 or 1.0
+        return [x / norm for x in vec]
 
-    def encode(self, texts: list[str]) -> list[list[float]]:
+    async def encode(self, texts: list[str]) -> list[list[float]]:
         return [self._feats(t) for t in texts]
 
-    def embed_query(self, text: str) -> list[float]:
-        return self._feats(text)
+
+async def _build_rag_service(tmp_path: Path) -> RAGQueryService:
+    store = QdrantProvider(collection="rag_test", path=tmp_path / "qdrant")
+    await store.connect()
+    embedder = FakeEmbedder()
+    chunks = [
+        {
+            "chunk_id": "147:paragraph:1",
+            "article_number": 147,
+            "chunk_number": 1,
+            "citation": "Egyptian Civil Code, Article 147",
+            "source_page": 24,
+            "text_ar": "(1) العقد شريعة المتعاقدين، فلا يجوز نقضه ولا تعديله إلا باتفاق الطرفين.",
+            "text_en": "The contract makes the law of the parties. It can be revoked only by mutual consent.",
+            "chunk_text": "(1) العقد شريعة المتعاقدين، فلا يجوز نقضه ولا تعديله إلا باتفاق الطرفين.",
+            "is_repealed": False,
+        },
+        {
+            "chunk_id": "148:paragraph:1",
+            "article_number": 148,
+            "chunk_number": 1,
+            "citation": "Egyptian Civil Code, Article 148",
+            "source_page": 24,
+            "text_ar": "يجب تنفيذ العقد طبقا لما اشتمل عليه وبطريقة تتفق مع ما يوجبه حسن النية.",
+            "text_en": "A contract must be performed in accordance with its contents and in good faith.",
+            "chunk_text": "A contract must be performed in accordance with its contents and in good faith.",
+            "is_repealed": False,
+        },
+        {
+            "chunk_id": "450:paragraph:1",
+            "article_number": 450,
+            "chunk_number": 1,
+            "citation": "Egyptian Civil Code, Article 450",
+            "source_page": 72,
+            "text_ar": "",
+            "text_en": "When the purchaser has given notice to the vendor of the defect in the thing sold.",
+            "chunk_text": "When the purchaser has given notice to the vendor of the defect in the thing sold.",
+            "is_repealed": False,
+        },
+        {
+            "chunk_id": "492:paragraph:1",
+            "article_number": 492,
+            "chunk_number": 1,
+            "citation": "Egyptian Civil Code, Article 492",
+            "source_page": 78,
+            "text_ar": "تقع هبة الأموال المستقبلة باطلة.",
+            "text_en": "A gift of future property is void.",
+            "chunk_text": "تقع هبة الأموال المستقبلة باطلة.",
+            "is_repealed": False,
+        },
+        {
+            "chunk_id": "499:paragraph:1",
+            "article_number": 499,
+            "chunk_number": 1,
+            "citation": "Egyptian Civil Code, Article 499",
+            "source_page": 79,
+            "text_ar": "إذا اشترط الواهب عوضا عن الهبة وفاء ديونه فلا يكون الموهوب له ملزما إلا بوفاء الديون.",
+            "text_en": "If the donor stipulates that the donee shall pay the donor's debts.",
+            "chunk_text": "إذا اشترط الواهب عوضا عن الهبة وفاء ديونه فلا يكون الموهوب له ملزما إلا بوفاء الديون.",
+            "is_repealed": False,
+        },
+        {
+            "chunk_id": "558:paragraph:1",
+            "article_number": 558,
+            "chunk_number": 1,
+            "citation": "Egyptian Civil Code, Article 558",
+            "source_page": 88,
+            "text_ar": "الإيجار عقد يلتزم المؤجر بمقتضاه أن يمكن المستأجر من الانتفاع بشيء معين مدة معينة.",
+            "text_en": "A lease is a contract by which the lessor undertakes to enable the lessee to enjoy a specific thing.",
+            "chunk_text": "الإيجار عقد يلتزم المؤجر بمقتضاه أن يمكن المستأجر من الانتفاع بشيء معين مدة معينة.",
+            "is_repealed": False,
+        },
+        {
+            "chunk_id": "60:paragraph:1",
+            "article_number": 60,
+            "chunk_number": 1,
+            "citation": "Egyptian Civil Code, Article 60",
+            "source_page": 10,
+            "text_ar": "",
+            "text_en": "Contract repealed provision placeholder.",
+            "chunk_text": "Contract repealed provision placeholder.",
+            "is_repealed": True,
+        },
+    ]
+    embeddings = await embedder.encode([_bilingual_chunk_text(c) for c in chunks])
+    await store.save_document(
+        "civil_code.pdf",
+        "civil_code.pdf",
+        3,
+        chunks,
+        embeddings,
+        embedder.model_id,
+        tenant_id="org_default",
+    )
+    return RAGQueryService(
+        storage=store,
+        embedder=embedder,
+        llm=MockLLMProvider(),
+        top_k=3,
+        hybrid_search=True,
+    )
 
 
-def _build_pipeline() -> RAGPipeline:
-    store = QdrantStore(":memory:", "rag_test")
-    store.ensure_collection(8)
-    store.add([
-        Chunk(id="1:article", vector=[1, 0, 0, 0, 0, 0, 0, 0], article_number=1,
-              citation="Egyptian Civil Code, Article 1", text_en="the contract is the law",
-              text_ar="العقد شريعة المتعاقدين"),
-        Chunk(id="2:article", vector=[0, 0, 1, 0, 0, 0, 0, 0], article_number=2,
-              citation="Egyptian Civil Code, Article 2", text_en="sale obligation"),
-    ])
-    return RAGPipeline(store=store, embedder=FakeEmbedder(), llm=ExtractiveLLM())
+def test_rrf_penalizes_repealed_articles_unless_explicitly_queried():
+    dense = [
+        {"document_id": 1, "chunk_id": "60:1", "is_repealed": True, "score": 0.9},
+        {"document_id": 1, "chunk_id": "147:1", "is_repealed": False, "score": 0.85},
+    ]
+    lexical = [
+        {"document_id": 1, "chunk_id": "60:1", "is_repealed": True, "score": 1.0},
+        {"document_id": 1, "chunk_id": "147:1", "is_repealed": False, "score": 0.9},
+    ]
+    fused = _fuse_rrf(dense, lexical, question="What is binding force of a contract?")
+    assert fused[0]["chunk_id"] == "147:1"
 
 
-def test_ask_returns_answer_and_citation_sources():
-    rag = _build_pipeline()
-    result = rag.ask("what is a contract?")
-    assert "answer" in result
-    assert result["sources"]
-    assert result["sources"][0] == "Egyptian Civil Code, Article 1"
+@pytest.mark.asyncio
+async def test_ask_returns_answer_and_article_citations(tmp_path: Path):
+    rag = await _build_rag_service(tmp_path)
+    try:
+        result = await rag.ask("What does Article 147 say about contract?", top_k=2)
+        assert "Egyptian Civil Code, Article 147" in result["answer"]
+        assert result["trace_id"]
+        assert result["sources"]
+        assert result["sources"][0]["article_number"] == 147
+    finally:
+        await rag.storage.disconnect()
 
 
-def test_ask_sources_are_article_citations_not_chunk_ids():
-    rag = _build_pipeline()
-    result = rag.ask("sale")
-    for src in result["sources"]:
-        assert src.startswith("Egyptian Civil Code, Article ")
+@pytest.mark.asyncio
+async def test_ask_stream_emits_sources_tokens_and_done(tmp_path: Path):
+    rag = await _build_rag_service(tmp_path)
+    try:
+        events = [event async for event in rag.ask_stream("good faith contract", top_k=2)]
+        types = [e["type"] for e in events]
+        assert types[0] == "sources"
+        assert "token" in types
+        assert types[-1] == "done"
+        assert events[-1]["trace_id"]
+    finally:
+        await rag.storage.disconnect()
 
 
-def test_retrieve_respects_top_k():
-    rag = _build_pipeline()
-    hits = rag.retrieve("contract", top_k=1)
-    assert len(hits) == 1
+@pytest.mark.asyncio
+async def test_bilingual_retrieval_ranks_lease_558_and_gift_492_first(tmp_path: Path):
+    rag = await _build_rag_service(tmp_path)
+    try:
+        lease_res = await rag.ask("What is a lease contract?", top_k=3)
+        assert lease_res["sources"]
+        assert lease_res["sources"][0]["article_number"] == 558
+
+        gift_res = await rag.ask("ما حكم هبة الأموال المستقبلة؟", top_k=3)
+        assert gift_res["sources"]
+        assert gift_res["sources"][0]["article_number"] == 492
+    finally:
+        await rag.storage.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_ask_declines_out_of_scope_criminal_query(tmp_path: Path):
+    rag = await _build_rag_service(tmp_path)
+    try:
+        result = await rag.ask("What is the penalty for theft?", top_k=2)
+        assert result["sources"] == []
+        assert "out of scope" in result["answer"].lower()
+        assert "imprisonment" not in result["answer"].lower()
+
+        non_civil = await rag.ask(
+            "What is the corporate capital gains tax rate for SaaS IPOs?", top_k=2
+        )
+        assert non_civil["sources"] == []
+        assert "out of scope" in non_civil["answer"].lower()
+
+        stream_events = [
+            event async for event in rag.ask_stream("ما هي عقوبة السرقة؟", top_k=2)
+        ]
+        done = stream_events[-1]
+        assert done["type"] == "done"
+        assert done["sources"] == []
+        assert "out of scope" in done["answer"].lower()
+    finally:
+        await rag.storage.disconnect()

@@ -17,7 +17,6 @@ User classes and weights:
 """
 
 import json
-import os
 import random
 from pathlib import Path
 
@@ -111,7 +110,8 @@ class StreamUser(HttpUser):
             stream=True,
             catch_response=True,
         ) as response:
-            for line in response.iter_lines():
+            for raw_line in response.iter_lines(decode_unicode=True):
+                line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else raw_line
                 if not line or not line.startswith("data: "):
                     continue
                 try:

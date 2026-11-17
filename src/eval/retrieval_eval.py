@@ -16,6 +16,7 @@ from pathlib import Path
 from qdrant_client import AsyncQdrantClient, models
 
 from law_api.config import settings
+from law_api.services import _bilingual_chunk_text
 from law_api.stores.embeddings.EmbeddingProviderFactory import EmbeddingProviderFactory
 
 from .dataset import DATASET_PATH, _load_jsonl
@@ -29,7 +30,7 @@ async def _build_index(chunks: list[dict], model_name: str, collection: str) -> 
     from uuid import NAMESPACE_URL, uuid5
 
     provider = EmbeddingProviderFactory.create(model_name)
-    texts = [chunk["chunk_text"] for chunk in chunks]
+    texts = [_bilingual_chunk_text(chunk) for chunk in chunks]
     vectors: list[list[float]] = []
     batch = 64
     for start in range(0, len(texts), batch):
@@ -49,7 +50,7 @@ async def _build_index(chunks: list[dict], model_name: str, collection: str) -> 
             vector=vector,
             payload={**chunk},
         )
-        for chunk, vector in zip(chunks, vectors)
+        for chunk, vector in zip(chunks, vectors, strict=True)
     ]
     await client.upsert(collection_name=collection, points=points)
     return client, dimension
@@ -77,7 +78,21 @@ async def evaluate_config(
     collection: str = "retrieval_eval",
 ) -> dict:
     """Evaluate one (embedding model, top_k) configuration."""
-    client, dimension = await _build_index(chunks, model_name, collection)
+    target_collection = collection
+    if settings.qdrant_url and (model_name == settings.embedding_name or collection in (settings.qdrant_collection, "law_chunks")):
+        try:
+            live_client = AsyncQdrantClient(url=settings.qdrant_url, check_compatibility=False)
+            coll = await live_client.get_collection(collection_name=settings.qdrant_collection)
+            if coll.points_count > 0:
+                client = live_client
+                target_collection = settings.qdrant_collection
+                dimension = coll.config.params.vectors.size
+            else:
+                client, dimension = await _build_index(chunks, model_name, collection)
+        except Exception:
+            client, dimension = await _build_index(chunks, model_name, collection)
+    else:
+        client, dimension = await _build_index(chunks, model_name, collection)
     try:
         provider = EmbeddingProviderFactory.create(model_name)
         questions = [item["question"] for item in dataset]
@@ -87,10 +102,10 @@ async def evaluate_config(
             query_vectors.extend(await provider.encode(questions[start : start + batch]))
 
         ranks: list[int] = []
-        for item, query_vector in zip(dataset, query_vectors):
+        for item, query_vector in zip(dataset, query_vectors, strict=True):
             gold = int(item["ground_truth_article"])
             response = await client.query_points(
-                collection_name=collection, query=query_vector, limit=top_k
+                collection_name=target_collection, query=query_vector, limit=top_k
             )
             rank = 0
             for position, point in enumerate(response.points, start=1):
@@ -119,7 +134,7 @@ def _log_mlflow(metrics: dict, extra_params: dict | None = None) -> None:
                 params.update(extra_params)
             mlflow.log_params(params)
             mlflow.log_metrics(
-                {key: value for key, value in metrics.items() if isinstance(value, (int, float))}
+                {key: value for key, value in metrics.items() if isinstance(value, int | float)}
             )
     except Exception as error:
         print(f"mlflow logging failed (best-effort): {error}")
@@ -143,7 +158,7 @@ def _log_langfuse(metrics: dict) -> None:
     scored = {
         key: float(value)
         for key, value in metrics.items()
-        if isinstance(value, (int, float)) and key not in ("total_queries",)
+        if isinstance(value, int | float) and key not in ("total_queries",)
     }
     try:
         with client.start_as_current_observation(
@@ -212,7 +227,7 @@ def main() -> int:
         print("No configurations evaluated successfully")
         return 1
 
-    best = max(results, key=lambda item: item["mrr@5" if "mrr@5" in item else list(item)[0]])
+    best = max(results, key=lambda item: item["mrr@5" if "mrr@5" in item else next(iter(item))])
     print("\nBest configuration by MRR:")
     print(json.dumps(best, indent=2, ensure_ascii=False))
     return 0

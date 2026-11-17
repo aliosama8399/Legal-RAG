@@ -1,0 +1,24 @@
+# Keep the build context small: everything here is sent to the Docker daemon
+# on every build. (src/data is deliberately NOT ignored - it is inside src/.)
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.idea
+.vscode
+.env
+.env.*
+storage
+data
+mlruns
+mlartifacts
+monitoring
+deploy
+bentoml
+*.log
+docker-compose*.yml

@@ -95,9 +95,7 @@ def _looks_like_phone(candidate: str) -> bool:
     # Pure years, and short ranges, are prose rather than contact details.
     if re.fullmatch(r"(19|20)\d{2}", digits):
         return False
-    if "-" in candidate and len(digits) <= 8:
-        return False
-    return True
+    return not ("-" in candidate and len(digits) <= 8)
 
 
 # spaCy models are published only on GitHub releases, never on PyPI. Presidio's

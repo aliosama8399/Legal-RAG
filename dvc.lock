@@ -1,24 +1,23 @@
 schema: '2.0'
 stages:
   build_corpus:
-    cmd: python -m legal_rag.ingest.build_corpus data/raw/egyptian_civil_code.pdf
-      data/corpus/corpus.jsonl
+    cmd: python src/data/prepare_law.py src/data/raw/egyptian_civil_code.pdf --output-dir
+      src/data/processed
     deps:
-    - path: data/raw/egyptian_civil_code.pdf
+    - path: src/data/prepare_law.py
+      hash: md5
+      md5: ed46401e4d3420adf1794d5f1e60691a
+      size: 12790
+    - path: src/data/raw/egyptian_civil_code.pdf
       hash: md5
       md5: 5086ef5f16f15d856278db943e58e948
       size: 2599703
-    - path: src/legal_rag/ingest
-      hash: md5
-      md5: b420ff2dd62ddb9f99d8a986c2591ab8.dir
-      size: 70776
-      nfiles: 16
     outs:
-    - path: data/corpus/corpus.jsonl
+    - path: src/data/processed/law_articles.jsonl
       hash: md5
-      md5: 3ce5c5072dea31f76ac572fc8fcf43c2
-      size: 1166669
-    - path: data/corpus/corpus_stats.json
+      md5: b4519bd6cab2ac267ae3a71b14117fd7
+      size: 1172439
+    - path: src/data/processed/law_chunks.jsonl
       hash: md5
-      md5: 1af8abcee6daa1aa536766eda1263825
-      size: 124
+      md5: a14181c42fb34e5dc1194c02ab743289
+      size: 2068668

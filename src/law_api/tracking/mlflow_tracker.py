@@ -1,5 +1,5 @@
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 
 class MLflowTracker:
@@ -30,7 +30,5 @@ class MLflowTracker:
             yield mlflow
         finally:
             if mlflow is not None:
-                try:
+                with suppress(Exception):
                     mlflow.end_run()
-                except Exception:
-                    pass

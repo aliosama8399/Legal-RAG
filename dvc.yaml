@@ -1,11 +1,9 @@
 stages:
   build_corpus:
-    cmd: python -m legal_rag.ingest.build_corpus data/raw/egyptian_civil_code.pdf data/corpus/corpus.jsonl
+    cmd: python src/data/prepare_law.py src/data/raw/egyptian_civil_code.pdf --output-dir src/data/processed
     deps:
-      - data/raw/egyptian_civil_code.pdf
-      - src/legal_rag/ingest
+      - src/data/raw/egyptian_civil_code.pdf
+      - src/data/prepare_law.py
     outs:
-      - data/corpus/corpus.jsonl
-    metrics:
-      - data/corpus/corpus_stats.json:
-          cache: false
+      - src/data/processed/law_articles.jsonl
+      - src/data/processed/law_chunks.jsonl

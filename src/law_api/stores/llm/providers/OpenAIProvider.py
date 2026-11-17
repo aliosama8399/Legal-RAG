@@ -1,6 +1,25 @@
+import os
 from collections.abc import AsyncIterator
 
 from ..LLMInterface import LLMInterface
+
+_PROVIDER_API_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+}
+
+
+def _resolve_openai_compat_key(provider_name: str, explicit: str) -> str:
+    if explicit:
+        return explicit
+    env_var = _PROVIDER_API_KEY_ENV.get(provider_name, "")
+    return (
+        (os.getenv(env_var, "") if env_var else "")
+        or os.getenv("LAW_API_LLM_API_KEY", "")
+        or os.getenv("OPENAI_API_KEY", "")
+    )
 
 
 def _usage_from(response) -> dict[str, int]:
@@ -44,13 +63,30 @@ class OpenAIProvider(LLMInterface):
 
     name = "openai"
 
-    def __init__(self, model_id: str, api_key: str = "", base_url: str = "") -> None:
+    def __init__(
+        self,
+        model_id: str,
+        api_key: str = "",
+        base_url: str = "",
+        provider_name: str = "openai",
+    ) -> None:
+        self.name = provider_name or "openai"
         self.model_id = model_id
-        self._api_key = api_key
+        self._api_key = _resolve_openai_compat_key(self.name, api_key)
         self._base_url = base_url
         self._client = None
         # Token counts of the most recent call, read by the caller for metrics.
         self.last_usage: dict[str, int] | None = None
+
+    def _connection_error_message(self) -> str:
+        if self.name == "vllm":
+            return (
+                f"Cannot reach the LLM server at '{self._base_url}' — is the container up "
+                "and the model loaded? Check: docker compose ps vllm && docker compose logs vllm "
+                "(vLLM only accepts connections after the model finishes loading)"
+            )
+        endpoint = self._base_url or "https://api.openai.com/v1"
+        return f"Cannot reach the '{self.name}' LLM endpoint at '{endpoint}'."
 
     def _ensure_client(self):
         if self._client is None:
@@ -96,11 +132,7 @@ class OpenAIProvider(LLMInterface):
             from openai import APIConnectionError
 
             if isinstance(error, (APIConnectionError, httpx.ConnectError, httpx.TransportError)):
-                raise RuntimeError(
-                    f"Cannot reach the LLM server at '{self._base_url}' — is the container up "
-                    "and the model loaded? Check: docker compose ps vllm && docker compose logs vllm "
-                    "(vLLM only accepts connections after the model finishes loading)"
-                ) from error
+                raise RuntimeError(self._connection_error_message()) from error
             raise
         self.last_usage = _usage_from(response)
         return response.choices[0].message.content or ""
@@ -132,11 +164,7 @@ class OpenAIProvider(LLMInterface):
             from openai import APIConnectionError
 
             if isinstance(error, (APIConnectionError, httpx.ConnectError, httpx.TransportError)):
-                raise RuntimeError(
-                    f"Cannot reach the LLM server at '{self._base_url}' — is the container up "
-                    "and the model loaded? Check: docker compose ps vllm && docker compose logs vllm "
-                    "(vLLM only accepts connections after the model finishes loading)"
-                ) from error
+                raise RuntimeError(self._connection_error_message()) from error
             raise
         async for chunk in stream:
             # The usage-only chunk arrives last and carries no choices.

@@ -1,27 +1,70 @@
-# Legal-RAG
+# Legal-RAG — Enterprise Multi-Tenant Legal AI Platform
 
-Retrieval-augmented QA over the **Egyptian Civil Code**. Ingestion and evaluation
-run in containers; the generative model is served by vLLM on a single GPU.
+Multi-tenant, retrieval-augmented QA SaaS platform over the **Egyptian Civil Code**
+(and tenant-uploaded bilingual PDFs). Supports commercial LLM APIs (`openai` / ChatGPT,
+`gemini`, `claude` / `anthropic`, `openrouter`, `groq`, `deepseek`), self-hosted engines
+(`vllm`, `ollama`, `local`), and a zero-dependency CPU `mock` mode for CI/local runs.
 
-The RAG path is: question → query embedding → Qdrant cosine search → cross-encoder
-rerank → citation-grounded prompt → vLLM generation → PII guardrail → answer, with
-every step traced in Langfuse and scored by Ragas.
+The RAG path is: tenant auth & rate limit → query contextualization → hybrid retrieval
+(Qdrant cosine search + lexical BM25/article lookup fused via RRF) → cross-encoder
+rerank → citation-grounded prompt → configurable LLM provider → PII guardrail → answer
+(plus usage metering, audit logs, Langfuse traces, and provider-level Ragas/live eval).
 
 ---
 
-## Quickstart
+## Quickstart & Running Modes
+
+### Option A: Clean Machine / CPU-Only Mock Mode (No GPU or External Keys Needed)
 
 ```bash
-# 1. configure — copy .env.example to .env and set the secrets
+# 1. install Python dependencies
+uv sync
+
+# 2. run locally without a GPU or external API keys
+LAW_API_LLM_PROVIDER=mock LAW_API_RERANK=false uv run uvicorn law_api.main:app --host 127.0.0.1 --port 8000
+
+# 3. optional: start the SaaS React workspace UI (in a second terminal)
+cd frontend && npm ci && npm run dev   # http://localhost:5173
+```
+
+### Option B: Cloud LLM Providers (OpenAI / ChatGPT, Gemini, Claude, OpenRouter, Groq, DeepSeek)
+
+Configure your provider and key in `.env` (copied from `.env.example`) for **serving** and/or **evaluation judging**:
+
+```env
+# Serving generation (/api/v1/ask, /api/v1/conversations/.../messages)
+LAW_API_LLM_PROVIDER=openai          # openai, gemini, anthropic, claude, openrouter, groq, deepseek, vllm, ollama, local, mock
+LAW_API_LLM_MODEL=gpt-4o-mini        # e.g. gemini-2.0-flash, claude-3-5-sonnet-latest, Qwen/Qwen2.5-1.5B-Instruct
+LAW_API_LLM_API_KEY=sk-...           # or set OPENAI_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY
+
+# Evaluation & LLM-as-Judge (eval.ragas_eval, eval.dataset, and /ask?evaluate=true)
+LAW_API_EVAL_GENERATION_PROVIDER=openai
+LAW_API_EVAL_GENERATION_MODEL=gpt-4o-mini
+LAW_API_EVAL_JUDGE_PROVIDER=gemini
+LAW_API_EVAL_JUDGE_MODEL=gemini-2.5-flash
+LAW_API_EVAL_JUDGE_API_KEY=...
+```
+
+### Option C: Full Docker Compose Stack (vLLM + Qdrant + BentoML + UI)
+
+```bash
+# 1. configure — copy .env.example to .env and set secrets/keys
 cp .env.example .env
 
 # 2. build the lockfile if pyproject changed, then start the core stack
 uv lock
 docker compose up -d --build
 
-# 3. ingest a document
-curl -X POST http://localhost:8000/api/v1/documents/upload -F "file=@src/data/raw/egyptian_civil_code.pdf"
-curl -X POST http://localhost:8000/api/v1/documents/1/embed
+# 3. ingest a document (async SaaS job -> 202 Accepted)
+curl -X POST http://localhost:8000/api/v1/documents/ingest \
+  -H 'Idempotency-Key: init-civil-code-v1' \
+  -F "file=@src/data/raw/egyptian_civil_code.pdf"
+# poll job progress:
+curl http://localhost:8000/api/v1/documents/jobs/<job_id>
+
+# (or legacy two-step synchronous upload + embed):
+# curl -X POST http://localhost:8000/api/v1/documents/upload -F "file=@src/data/raw/egyptian_civil_code.pdf"
+# curl -X POST http://localhost:8000/api/v1/documents/1/embed
 
 # 4. ask (non-streaming)
 curl -X POST http://localhost:8000/api/v1/ask \
@@ -33,6 +76,32 @@ curl -N -X POST http://localhost:8000/api/v1/ask/stream \
   -H 'Content-Type: application/json' \
   -d '{"question":"Who is liable for damages caused by a thing?","top_k":5}'
 ```
+
+### Quality Gates & Tests
+
+```bash
+uv run ruff check src tests
+uv run pytest -q
+cd frontend && npm run build
+```
+
+---
+
+## Enterprise SaaS Capabilities
+
+- **Multi-Tenancy, Auth & RBAC (`org_...`):** Set `LAW_API_AUTH_REQUIRED=true` in production to enforce strict authentication (`false` by default for backwards compatibility when unauthenticated; supplied tokens/keys are always validated and tenant-isolated).
+  - JWT Bearer authentication: `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `GET /api/v1/auth/me`.
+  - Scoped API keys (`lrag_live_...`, SHA-256 hashed at rest): `POST/GET/DELETE /api/v1/tenants/api-keys`.
+  - Roles: `owner`, `admin`, `attorney`, `viewer`.
+- **Metering, Rate Limiting & Audit Trail:**
+  - Sliding-window rate limiter (`LAW_API_RATE_LIMIT_RPM`) emitting `X-RateLimit-*` and `X-Request-ID` headers (`429` on exhaustion) plus RFC 9457 Problem Details JSON errors.
+  - Token + USD cost ledger (`GET /api/v1/tenants/usage`) and immutable SOC2 audit log (`GET /api/v1/tenants/audit-logs`).
+- **Async Document Ingestion & Lifecycle:**
+  - `POST /api/v1/documents/ingest` (`202 Accepted`) with `Idempotency-Key` deduplication and per-job status polling (`GET /api/v1/documents/jobs/{job_id}`).
+  - Tenant-scoped `GET /api/v1/documents` and `DELETE /api/v1/documents/{document_id}`.
+- **Hybrid Legal RAG, Conversations & Feedback:**
+  - `LAW_API_HYBRID_SEARCH=true` combines dense vector cosine similarity with lexical BM25 + exact Egyptian Civil Code article matching (`Article N` / `المادة N`) via Reciprocal Rank Fusion (RRF), plus repealed-article de-prioritization.
+  - Multi-turn threads via `/api/v1/conversations` and user satisfaction scoring via `POST /api/v1/feedback`.
 
 ---
 
@@ -164,14 +233,14 @@ flowchart LR
 
 ---
 
-## Models
+## Models & Providers
 
-| Role | Model | Served as |
+| Role | Default Local Model | Supported Providers (`*_PROVIDER`) |
 |---|---|---|
-| Generation (`/ask`) | `Qwen/Qwen2.5-1.5B-Instruct` | vLLM, `--dtype float16`, port `8001` |
-| Embedding | `arabert-all-nli-triplet-matryoshka` (768d) | sentence-transformers, in-process |
-| Reranking | `BAAI/bge-reranker-base` | cross-encoder, in-process, CPU |
-| Ragas judge | same vLLM engine as generation | one engine — a 6 GB card hosts only one |
+| Generation (`/ask`, `/conversations`) | `Qwen/Qwen2.5-1.5B-Instruct` (`vllm`, port `8001` host / `8000` docker) | `openai` (ChatGPT), `gemini`/`google`, `anthropic`/`claude`, `openrouter`, `groq`, `deepseek`, `vllm`, `ollama`, `local`, `mock` |
+| Embedding | `arabert-all-nli-triplet-matryoshka` (768d) | `gate-arabert-v1`, `arabert-all-nli-triplet-matryoshka`, `bge-m3` (`sentence-transformers`, in-process) |
+| Reranking | `BAAI/bge-reranker-base` | `bge-reranker-base`, `bge-reranker-v2-m3` (cross-encoder, CPU/GPU) |
+| Live & Ragas Judge | configurable via `LAW_API_EVAL_JUDGE_PROVIDER` | `openai`, `gemini`/`google`, `anthropic`/`claude`, `openrouter`, `groq`, `deepseek`, `vllm`, `ollama`, `local`, `mock` |
 
 ### Quantization: 4-bit, and why not AWQ
 
@@ -222,11 +291,12 @@ stack on a 12-core / 16 GB machine will saturate the CPU.
 |---|---|---|
 | *(default)* | `qdrant`, `vllm`, `bento-api` | `docker compose up -d` |
 | `ui` | `frontend` — React + nginx on :8080 | `docker compose --profile ui up -d` |
-| `canary` | `bento-canary` on :8001 | `docker compose --profile canary up -d` |
+| `canary` | `bento-canary` on :8002 | `docker compose --profile canary up -d` |
 | `tracking` | `mlflow` on :5000 | `docker compose --profile tracking up -d` |
 | `metrics` | `prometheus`, `grafana`, `alertmanager` | `docker compose --profile metrics up -d` |
 | `langfuse` | 6 tracing services on :3000 | `docker compose --profile langfuse up -d` |
-| `eval` | one-shot `eval-job` | `docker compose --profile eval run --rm eval-job` |
+| `eval` | one-shot `eval-job` + `airflow` | `docker compose --profile eval run --rm eval-job` |
+| `airflow` | Apache Airflow monthly scheduler & UI on :8085 | `docker compose --profile airflow up -d` |
 | `loadtest` | one-shot 50-user Locust run | `docker compose --profile loadtest run --rm loadtest` |
 | `datastores` | `postgres` (only for the PostgreSQL storage provider) | `docker compose --profile datastores up -d` |
 
@@ -250,6 +320,27 @@ docker compose --profile eval run --rm eval-job python -m eval.ragas_eval --top-
 
 # fast smoke test while iterating
 docker compose --profile eval run --rm eval-job python -m eval.ragas_eval --limit 2
+```
+
+### Automated Monthly & Manual Airflow Orchestration
+
+The evaluation pipeline is scheduled in Apache Airflow via [`dags/legal_rag_monthly_evaluation_dag.py`](dags/legal_rag_monthly_evaluation_dag.py) (`dag_id="legal_rag_monthly_eval"`, schedule `0 0 1 * *` — automatic on the 1st of each month, with manual trigger support):
+
+1. `verify_corpus_and_dataset` → validates `law_chunks.jsonl` and `qa_dataset.jsonl`
+2. `compute_embedding_drift` → computes query cosine drift (`latest_drift.json`)
+3. `run_monthly_rag_evaluation` → runs retrieval + chunk sweep + Ragas evaluation (`evaluation_report.md`, `latest_scores.json`, MLflow, Langfuse)
+4. `verify_quality_gate` → checks faithfulness (`>= 0.80`), Hit@5 (`>= 0.70`), and drift thresholds
+
+```bash
+# Start Airflow UI & monthly scheduler (http://localhost:8085)
+docker compose --profile airflow up -d
+
+# Trigger manually from Airflow CLI (optional JSON overrides: limit, skip_ragas, skip_chunks)
+docker compose --profile airflow exec airflow airflow dags trigger legal_rag_monthly_eval --conf '{"limit": 5}'
+
+# Inspect or run the exact DAG manually without Docker / Airflow server:
+python dags/legal_rag_monthly_evaluation_dag.py --dry-run
+python dags/legal_rag_monthly_evaluation_dag.py --manual --skip-chunks --skip-ragas
 ```
 
 **Runtime warning:** the judge is the same 1.5B engine as generation, and
@@ -388,12 +479,11 @@ Non-secret configuration has exactly one home. If a value appears in both
 
 ## Known limitations
 
-- **AWQ is not available** on this GPU (`sm_75`); NF4 is the 4-bit path.
-- **The Ragas judge is the generation model.** A 1.5B judge produces noisy
-  scores. Point `LAW_API_EVAL_JUDGE_BASE_URL` at a stronger
-  OpenAI-compatible endpoint for numbers you intend to trust.
-- **Retrieved-context quality is the real ceiling.** The retrieval sweep reports
-  low `hit_rate@10`; a weak embedder cannot be fixed by a better generator.
-- **Single GPU, single engine.** No judge/generation split, no second vLLM.
+- **AWQ is not available** on Turing GPUs (`sm_75`); NF4 (`bitsandbytes`) is the 4-bit path for local vLLM.
+- **Local 1.5B judge noise.** When running local single-GPU vLLM, a 1.5B judge produces noisy
+  Ragas scores. Set `LAW_API_EVAL_JUDGE_PROVIDER` / `EVAL_JUDGE_PROVIDER` to `openai`, `gemini`,
+  or `claude` (with the matching model and API key) for reliable automated grading.
+- **Retrieved-context quality is the real ceiling.** Hybrid dense + lexical RRF improves exact
+  article lookups, while general semantic recall remains bounded by the configured embedder.
 - Streaming redaction holds text until a scanned sentence boundary, so
   time-to-first-token is slightly worse when the guardrail is active.
