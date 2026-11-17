@@ -23,13 +23,18 @@ import hashlib
 import json
 import math
 import re
-from datetime import UTC, datetime  # noqa: F401 - kept for eval run naming
+from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
-from openai import AsyncOpenAI
+from qdrant_client import AsyncQdrantClient
 
 from law_api.config import settings
+from law_api.services import _bilingual_chunk_text
 from law_api.stores.embeddings.EmbeddingProviderFactory import EmbeddingProviderFactory
+from law_api.stores.llm.LLMInterface import LLMInterface
+from law_api.stores.llm.LLMProviderFactory import LLMProviderFactory
+from law_api.stores.llm.providers.OpenAIProvider import _resolve_openai_compat_key
 
 from .dataset import DATASET_PATH, _load_jsonl
 from .retrieval_eval import DEFAULT_CHUNKS, _build_index
@@ -99,23 +104,28 @@ async def _run_pipeline(
     generation observation is emitted by the official langfuse.openai wrapper,
     so the model name and token usage are captured automatically.
     """
-    client, _ = await _build_index(chunks, model_name, "ragas_eval")
-    provider = EmbeddingProviderFactory.create(model_name)
-    # The Langfuse OpenAI wrapper is a drop-in AsyncOpenAI: it traces each call
-    # as a generation observation when tracing is on, and behaves identically
-    # when it is off or unavailable.
-    generation_class = AsyncOpenAI
-    if langfuse_client is not None:
+    collection_name = "ragas_eval"
+    if settings.qdrant_url and model_name == settings.embedding_name:
         try:
-            from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
-
-            generation_class = LangfuseAsyncOpenAI
+            live_client = AsyncQdrantClient(url=settings.qdrant_url, check_compatibility=False)
+            coll = await live_client.get_collection(collection_name=settings.qdrant_collection)
+            if coll.points_count > 0:
+                client = live_client
+                collection_name = settings.qdrant_collection
+            else:
+                client, _ = await _build_index(chunks, model_name, collection_name)
         except Exception:
-            generation_class = AsyncOpenAI
-    generation = generation_class(
-        api_key="not-needed", base_url=settings.eval_generation_base_url
+            client, _ = await _build_index(chunks, model_name, collection_name)
+    else:
+        client, _ = await _build_index(chunks, model_name, collection_name)
+    provider = EmbeddingProviderFactory.create(model_name)
+    generation_llm = LLMProviderFactory.create(
+        settings.eval_generation_provider,
+        settings.eval_generation_model,
+        api_key=settings.eval_generation_api_key,
+        base_url=settings.eval_generation_base_url,
     )
-    # vLLM batches concurrent requests, so this is much faster than one at a time.
+    # Concurrent batch execution via provider interface (vLLM/commercial APIs benefit from concurrency).
     gate = asyncio.Semaphore(concurrency)
     done = 0
     trace_span = (
@@ -131,15 +141,18 @@ async def _run_pipeline(
         async with gate:
             query_vector = (await provider.encode([question]))[0]
             response = await client.query_points(
-                collection_name="ragas_eval", query=query_vector, limit=top_k
+                collection_name=collection_name, query=query_vector, limit=top_k
             )
-            contexts = [point.payload.get("chunk_text", "") for point in response.points]
-            context = "\n\n".join(contexts)
+            contexts = [_bilingual_chunk_text(point.payload) for point in response.points]
+            context = "\n\n".join(
+                f"[{point.payload.get('citation', 'Egyptian Civil Code')}] {ctx}"
+                for point, ctx in zip(response.points, contexts, strict=True)
+            )
             prompt = f"Articles:\n{context}\n\nQuestion: {question}\nAnswer:"
             # One trace per question, opened BEFORE the generation call so it is
-            # visible in the UI while vLLM is still working.
+            # visible in the UI while the LLM responds.
             if trace_span is None:
-                answer = await _answer(generation, prompt)
+                answer = await _answer(generation_llm, prompt)
             else:
                 with trace_span(
                     as_type="span",
@@ -147,6 +160,7 @@ async def _run_pipeline(
                     input={"question": question, "top_k": top_k},
                     metadata={
                         "embedding_model": model_name,
+                        "generation_provider": generation_llm.name,
                         "generation_model": settings.eval_generation_model,
                     },
                 ) as span:
@@ -165,7 +179,7 @@ async def _run_pipeline(
                                 "returned": len(contexts),
                             }
                         )
-                    answer = await _answer(generation, prompt)
+                    answer = await _answer(generation_llm, prompt)
                     if span is not None:
                         span.update(
                             output={
@@ -190,37 +204,108 @@ async def _run_pipeline(
         await client.close()
 
 
-async def _answer(generation, prompt: str) -> str:
-    response = await generation.chat.completions.create(
-        model=settings.eval_generation_model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
+async def _answer(generation_llm: LLMInterface, prompt: str) -> str:
+    return await generation_llm.generate(
+        prompt,
+        system=SYSTEM_PROMPT,
         temperature=0.0,
         max_tokens=512,
     )
-    return response.choices[0].message.content or ""
 
 
 def _judge_llm():
-    from langchain_openai import ChatOpenAI
-    from ragas.llms import LangchainLLMWrapper
+    from langchain_core.outputs import Generation, LLMResult
+    from ragas.llms import BaseRagasLLM
 
-    return LangchainLLMWrapper(
-        ChatOpenAI(
-            model=settings.eval_judge_model,
-            base_url=settings.eval_judge_base_url,
-            api_key="not-needed",
-            temperature=0,
-            # A 1.5B judge on an eager (no CUDA-graph) vLLM engine takes minutes
-            # for the structured judge outputs, which outlived the library's
-            # client default and killed the run with Job TimeoutError. Cap it off
-            # explicitly and let retries absorb a transient failure.
-            timeout=None,
-            max_retries=3,
-        )
+    provider_name = (settings.eval_judge_provider or "vllm").strip().lower()
+    if provider_name in ("openai", "vllm", "openrouter", "groq", "deepseek"):
+        try:
+            from langchain_openai import ChatOpenAI
+            from ragas.llms import LangchainLLMWrapper
+
+            default_urls = {
+                "openai": None,
+                "vllm": "http://127.0.0.1:8000/v1",
+                "openrouter": "https://openrouter.ai/api/v1",
+                "groq": "https://api.groq.com/openai/v1",
+                "deepseek": "https://api.deepseek.com/v1",
+            }
+            resolved_key = _resolve_openai_compat_key(provider_name, settings.eval_judge_api_key)
+            base_url = settings.eval_judge_base_url or default_urls.get(provider_name)
+            return LangchainLLMWrapper(
+                ChatOpenAI(
+                    model=settings.eval_judge_model,
+                    base_url=base_url or None,
+                    api_key=resolved_key or "not-needed",
+                    temperature=0,
+                    timeout=None,
+                    max_retries=3,
+                )
+            )
+        except ImportError:
+            pass
+
+    judge_provider = LLMProviderFactory.create(
+        provider_name,
+        settings.eval_judge_model,
+        api_key=settings.eval_judge_api_key,
+        base_url=settings.eval_judge_base_url,
     )
+
+    class _ProviderRagasLLM(BaseRagasLLM):
+        def __init__(self, llm: LLMInterface) -> None:
+            super().__init__()
+            self._llm = llm
+
+        def generate_text(
+            self,
+            prompt,
+            n: int = 1,
+            temperature: float = 1e-8,
+            stop: list[str] | None = None,
+            callbacks=None,
+        ):
+            del stop, callbacks
+            prompt_text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
+
+            async def _run_batch():
+                texts = [
+                    await self._llm.generate(
+                        prompt_text,
+                        temperature=float(temperature or 0.0),
+                        max_tokens=1024,
+                    )
+                    for _ in range(max(1, n))
+                ]
+                return LLMResult(generations=[[Generation(text=t) for t in texts]])
+
+            return asyncio.run(_run_batch())
+
+        async def agenerate_text(
+            self,
+            prompt,
+            n: int = 1,
+            temperature: float = 1e-8,
+            stop: list[str] | None = None,
+            callbacks=None,
+        ):
+            del stop, callbacks
+            prompt_text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
+            texts = [
+                await self._llm.generate(
+                    prompt_text,
+                    temperature=float(temperature or 0.0),
+                    max_tokens=1024,
+                )
+                for _ in range(max(1, n))
+            ]
+            return LLMResult(generations=[[Generation(text=t) for t in texts]])
+
+        def is_finished(self, response) -> bool:
+            del response
+            return True
+
+    return _ProviderRagasLLM(judge_provider)
 
 
 def _eval_embeddings():
@@ -279,7 +364,7 @@ def _langfuse_client():
 
 
 def _finite(value) -> bool:
-    return isinstance(value, (int, float)) and math.isfinite(value)
+    return isinstance(value, int | float) and math.isfinite(value)
 
 
 def _aggregate(per_sample: list[dict]) -> dict:
@@ -297,22 +382,18 @@ def _aggregate(per_sample: list[dict]) -> dict:
 def _ensure_dataset(client, rows: list[dict]) -> None:
     """Keep the QA set in Langfuse so it can be re-run as an experiment later."""
     dataset_name = "legal-rag-qa"
-    try:
+    with suppress(Exception):  # noqa: BLE001 - already exists
         client.create_dataset(
             name=dataset_name, description="Egyptian Civil Code QA evaluation set"
         )
-    except Exception:  # noqa: BLE001 - already exists
-        pass
     for row in rows:
-        try:
+        with suppress(Exception):  # noqa: BLE001 - item already exists
             client.create_dataset_item(
                 dataset_name=dataset_name,
                 id="qa-" + hashlib.sha1(row["user_input"].encode("utf-8")).hexdigest()[:24],
                 input={"question": row["user_input"]},
                 expected_output=row["reference"],
             )
-        except Exception:  # noqa: BLE001 - item already exists
-            pass
 
 
 def _attach_scores(client, rows: list[dict], per_sample: list[dict]) -> int:
@@ -324,7 +405,7 @@ def _attach_scores(client, rows: list[dict], per_sample: list[dict]) -> int:
     trace ids instead.
     """
     attached = 0
-    for row, sample in zip(rows, per_sample):
+    for row, sample in zip(rows, per_sample, strict=True):
         trace_id = row.get("trace_id")
         if not trace_id:
             continue
@@ -445,7 +526,7 @@ def _log_mlflow(scores: dict, params: dict, rows: list[dict], per_sample: list[d
                         "contexts": "\n---\n".join(row["retrieved_contexts"]),
                         **{_safe_name(k): v for k, v in sample.items()},
                     }
-                    for row, sample in zip(rows, per_sample)
+                    for row, sample in zip(rows, per_sample, strict=True)
                 ]
             )
             mlflow.log_table(table, artifact_file="eval_results_table.json")
@@ -457,7 +538,7 @@ def _log_mlflow(scores: dict, params: dict, rows: list[dict], per_sample: list[d
                 trace_ids.append(span.trace_id)
             # Traces are written asynchronously; feedback needs them to exist first.
             mlflow.flush_trace_async_logging()
-            for trace_id, sample in zip(trace_ids, per_sample):
+            for trace_id, sample in zip(trace_ids, per_sample, strict=True):
                 for name, value in sample.items():
                     if _finite(value):
                         mlflow.log_feedback(

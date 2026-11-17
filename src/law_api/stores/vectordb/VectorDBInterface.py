@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 
 class VectorDBInterface(ABC):
-    """Abstract base class for storage/vector-db providers.
+    """Abstract base class for tenant-isolated storage/vector-db providers.
 
     Every backend (Qdrant, PostgreSQL/pgvector) must inherit
     from this class and implement every method below. Connection setup is
@@ -27,16 +27,14 @@ class VectorDBInterface(ABC):
         articles: int,
         chunks: list[dict],
         next_id_floor: int = 0,
+        tenant_id: str = "org_default",
     ) -> int:
-        """Register a pending (not yet embedded) document and return its id.
-
-        ``next_id_floor`` is the lowest id the caller requires (e.g. derived
-        from persisted pending files) so ids are never reused across
-        restarts even when the document was not embedded yet.
-        """
+        """Register a pending (not yet embedded) document and return its id."""
 
     @abstractmethod
-    async def get_document_chunks(self, document_id: int) -> list[dict]: ...
+    async def get_document_chunks(
+        self, document_id: int, tenant_id: str = "org_default"
+    ) -> list[dict]: ...
 
     @abstractmethod
     async def save_embeddings(
@@ -45,6 +43,7 @@ class VectorDBInterface(ABC):
         embeddings: list[list[float]],
         embedding_model: str,
         chunks: list[dict] | None = None,
+        tenant_id: str = "org_default",
     ) -> tuple[int, int]: ...
 
     @abstractmethod
@@ -56,6 +55,7 @@ class VectorDBInterface(ABC):
         chunks: list[dict],
         embeddings: list[list[float]],
         embedding_model: str,
+        tenant_id: str = "org_default",
     ) -> tuple[int, int]: ...
 
     @abstractmethod
@@ -64,7 +64,28 @@ class VectorDBInterface(ABC):
         document_id: int | None,
         query_vector: list[float],
         top_k: int,
+        tenant_id: str = "org_default",
     ) -> list[dict]: ...
+
+    async def lexical_search(
+        self,
+        document_id: int | None,
+        query_text: str,
+        top_k: int,
+        tenant_id: str = "org_default",
+    ) -> list[dict]:
+        """Optional lexical/BM25/exact-citation search for hybrid RRF fusion."""
+        return []
+
+    async def list_documents(self, tenant_id: str = "org_default") -> list[dict]:
+        """List embedded documents scoped to a tenant."""
+        return []
+
+    async def delete_document(
+        self, document_id: int, tenant_id: str = "org_default"
+    ) -> bool:
+        """Delete a document and its indexed chunks scoped to a tenant."""
+        return False
 
     @abstractmethod
     async def save_chat_message(
@@ -74,11 +95,13 @@ class VectorDBInterface(ABC):
         sources: list[dict],
         document_id: int | None,
         query_vector: list[float],
-    ) -> int: ...
+        tenant_id: str = "org_default",
+    ) -> int | str: ...
 
     @abstractmethod
     async def list_chat_history(
         self,
         document_id: int | None = None,
         limit: int = 50,
+        tenant_id: str = "org_default",
     ) -> list[dict]: ...

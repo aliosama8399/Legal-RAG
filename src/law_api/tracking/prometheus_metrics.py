@@ -59,9 +59,37 @@ LLM_COST = Counter(
 )
 
 # USD per million tokens. Qwen2.5-1.5B-Instruct is effectively free on a local
-# engine; override these to model a hosted provider.
+# engine; hosted commercial models fall back to standard public rates below
+# unless overridden explicitly via PRICE_* globals.
 PRICE_PROMPT_PER_MTOK = 0.0
 PRICE_COMPLETION_PER_MTOK = 0.0
+
+_MODEL_PRICING_PER_MTOK: tuple[tuple[str, tuple[float, float]], ...] = (
+    ("gpt-4o-mini", (0.15, 0.60)),
+    ("gpt-4o", (2.50, 10.00)),
+    ("gpt-4.1-mini", (0.40, 1.60)),
+    ("gpt-4.1", (2.00, 8.00)),
+    ("gemini-2.5-flash", (0.15, 0.60)),
+    ("gemini-2.5-pro", (1.25, 10.00)),
+    ("gemini-2.0-flash", (0.10, 0.40)),
+    ("gemini-1.5-pro", (1.25, 5.00)),
+    ("claude-3-7-sonnet", (3.00, 15.00)),
+    ("claude-3-5-sonnet", (3.00, 15.00)),
+    ("claude-3-5-haiku", (0.80, 4.00)),
+    ("deepseek-chat", (0.27, 1.10)),
+    ("llama-3.3-70b", (0.59, 0.79)),
+)
+
+
+def resolve_model_pricing(model: str) -> tuple[float, float]:
+    """Return (prompt_usd_per_mtok, completion_usd_per_mtok) for a model."""
+    if PRICE_PROMPT_PER_MTOK or PRICE_COMPLETION_PER_MTOK:
+        return PRICE_PROMPT_PER_MTOK, PRICE_COMPLETION_PER_MTOK
+    lowered = (model or "").lower()
+    for prefix, rates in _MODEL_PRICING_PER_MTOK:
+        if prefix in lowered:
+            return rates
+    return 0.0, 0.0
 
 
 # --- retrieval level -----------------------------------------------------
@@ -192,8 +220,9 @@ def record_usage(model: str, prompt_tokens: int, completion_tokens: int) -> floa
         return 0.0
     LLM_TOKENS.labels(direction="prompt", model=model).inc(prompt_tokens)
     LLM_TOKENS.labels(direction="completion", model=model).inc(completion_tokens)
+    prompt_price, completion_price = resolve_model_pricing(model)
     cost = (
-        prompt_tokens * PRICE_PROMPT_PER_MTOK + completion_tokens * PRICE_COMPLETION_PER_MTOK
+        prompt_tokens * prompt_price + completion_tokens * completion_price
     ) / 1_000_000
     # Always increment, even at zero. A local vLLM run has a real cost of $0, and
     # skipping the increment left the series non-existent, so the cost panel read

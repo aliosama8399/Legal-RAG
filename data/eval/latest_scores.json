@@ -1,0 +1,18 @@
+{
+  "scores": {
+    "faithfulness": 1.0,
+    "answer_relevancy": 1.0,
+    "hybrid_hit_at_5": 0.7222,
+    "hybrid_mrr_at_5": 0.4793,
+    "hit_rate@5": 0.0,
+    "mrr@5": 0.0
+  },
+  "params": {
+    "generation_model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "judge_model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "embedding_model": "arabert-all-nli-triplet-matryoshka",
+    "questions": "54"
+  },
+  "questions": 54,
+  "written_at": "2026-11-17T10:00:00+00:00"
+}

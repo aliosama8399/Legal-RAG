@@ -1,5 +1,4 @@
-import os
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 
 # The Langfuse SDK's start_as_current_observation() takes a fixed keyword list
 # and NO **kwargs. Passing arbitrary attributes to it raises TypeError, which is
@@ -150,35 +149,25 @@ class LangfuseTracker:
                 self._warned_keys.add("trace-open")
                 print(f"langfuse: could not open span '{name}' ({error}) - tracing degraded")
             if clean_token is not None:
-                try:
+                with suppress(Exception):
                     otel_context.detach(clean_token)
-                except Exception:
-                    pass
             yield None
             return
         try:
             yield observation
         except BaseException as error:
-            try:
+            with suppress(Exception):
                 span.__exit__(type(error), error, error.__traceback__)
-            except Exception:
-                pass
             raise
         else:
-            try:
+            with suppress(Exception):
                 span.__exit__(None, None, None)
-            except Exception:
-                pass
         finally:
             if clean_token is not None:
-                try:
+                with suppress(Exception):
                     otel_context.detach(clean_token)
-                except Exception:
-                    pass
 
     def flush(self) -> None:
         if self._client is not None:
-            try:
+            with suppress(Exception):
                 self._client.flush()
-            except Exception:
-                pass

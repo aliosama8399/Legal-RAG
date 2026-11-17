@@ -1,13 +1,13 @@
-# Data API
+# Data & SaaS API
 
-The API is organized as MVC-style layers:
+The API is organized into layered modules under `src/law_api/`:
 
-- `law_api/controllers/data/upload_data_controller.py`: upload and embedding controller.
-- `law_api/routes/data_routes.py`: data routes.
-- `law_api/services.py`: separate chunking and embedding use cases.
-- `law_api/providers/storage/`: PostgreSQL and Qdrant providers.
-- `law_api/schemas.py`: request/response contracts.
-- `law_api/main.py`: application composition.
+- `src/law_api/auth/`: Multi-tenant organizations, PBKDF2/JWT/prefixed API keys (`lrag_live_...`), RBAC dependencies, SQLite WAL state store.
+- `src/law_api/routes/`: `saas_routes.py`, `data_routes.py`, `rag_routes.py`, `health_routes.py`.
+- `src/law_api/jobs/ingestion_worker.py`: Async `202 Accepted` ingestion pipeline with `Idempotency-Key` deduplication.
+- `src/law_api/services.py`: Hybrid RAG query service, conversation context management, usage metering, and live evaluation.
+- `src/law_api/stores/`: Pluggable `vectordb` (`qdrant-local`, `qdrant`, `postgresql`), `embeddings`, `rerankers`, and `llm` (`openai`, `gemini`, `anthropic`/`claude`, `openrouter`, `groq`, `deepseek`, `vllm`, `ollama`, `local`, `mock`).
+- `src/law_api/schemas.py`, `middleware.py`, `exceptions.py`: Pydantic contracts, sliding-window rate limiter, `X-Request-ID`, RFC 9457 error formatting.
 
 Configuration is split into:
 
@@ -142,3 +142,75 @@ uv run python scripts/compare_embeddings.py `
 Each run logs the model ID, chunk count, batch size, vector dimension, total
 embedding time, and chunks per second. The MLflow UI can compare these runs in
 the `embedding-model-comparison` experiment.
+
+---
+
+## Multi-Tenant SaaS Endpoints
+
+### 1. Authentication & Organization Onboarding
+
+```bash
+# Register a new workspace + owner account
+curl -X POST http://127.0.0.1:8000/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"org_name":"Cairo Legal","email":"owner@example.com","password":"StrongPassword123","plan":"pro"}'
+
+# Authenticate existing user
+curl -X POST http://127.0.0.1:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"owner@example.com","password":"StrongPassword123"}'
+
+# Inspect active tenant profile (pass Authorization: Bearer <jwt> or X-API-Key: <key>)
+curl http://127.0.0.1:8000/api/v1/auth/me -H "Authorization: Bearer <access_token>"
+```
+
+### 2. Scoped API Keys, Usage Metering & Audit Logs
+
+```bash
+# Create a programmatic API key (admin/owner role)
+curl -X POST http://127.0.0.1:8000/api/v1/tenants/api-keys \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"backend-worker","scopes":["read","write"]}'
+
+# Inspect token usage, cost, and quota utilization
+curl http://127.0.0.1:8000/api/v1/tenants/usage -H "X-API-Key: lrag_live_..."
+
+# Query audit logs (admin/owner role)
+curl http://127.0.0.1:8000/api/v1/tenants/audit-logs -H "Authorization: Bearer <access_token>"
+```
+
+### 3. Asynchronous Document Ingestion (`202 Accepted`) & Lifecycle
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/documents/ingest \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Idempotency-Key: civil-code-v1" \
+  -F "file=@src/data/raw/egyptian_civil_code.pdf"
+
+curl http://127.0.0.1:8000/api/v1/documents/jobs/<job_id> -H "Authorization: Bearer <access_token>"
+curl http://127.0.0.1:8000/api/v1/documents -H "Authorization: Bearer <access_token>"
+curl -X DELETE http://127.0.0.1:8000/api/v1/documents/1 -H "Authorization: Bearer <access_token>"
+```
+
+### 4. Multi-Turn Conversations & Feedback
+
+```bash
+# Create conversation thread
+curl -X POST http://127.0.0.1:8000/api/v1/conversations \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Contract Nullity Review"}'
+
+# Ask a contextualized follow-up turn
+curl -X POST http://127.0.0.1:8000/api/v1/conversations/<conversation_id>/messages \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What does Article 147 say?","top_k":5}'
+
+# Submit answer feedback (score: 0 or 1)
+curl -X POST http://127.0.0.1:8000/api/v1/feedback \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"trace_id":"<trace_id>","score":1,"comment":"Accurate article citation"}'
+```

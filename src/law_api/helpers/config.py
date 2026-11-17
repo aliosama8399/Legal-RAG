@@ -33,6 +33,13 @@ def _env_or_yaml(environment_name: str, *keys: str, default: str = "") -> str:
     return os.getenv(environment_name, _yaml_value(*keys, default=default))
 
 
+def _eval_yaml_value(field: str, default: str = "") -> str:
+    value = _yaml_value("evaluation", field, default="")
+    if value:
+        return value
+    return _yaml_value("eval", field, default=default)
+
+
 @dataclass(frozen=True)
 class Settings:
     upload_dir: Path = Path(_env_or_yaml("LAW_API_UPLOAD_DIR", "paths", "upload_dir", default="storage/uploads"))
@@ -46,7 +53,12 @@ class Settings:
     mlflow_tracking_uri: str = _env_or_yaml("MLFLOW_TRACKING_URI", "mlflow", "tracking_uri", default="http://127.0.0.1:5000")
     mlflow_experiment: str = _env_or_yaml("MLFLOW_EXPERIMENT", "mlflow", "experiment", default="legal-rag-embeddings")
     llm_provider: str = _env_or_yaml("LAW_API_LLM_PROVIDER", "llm", "provider", default="openai")
-    llm_model: str = _env_or_yaml("LAW_API_LLM_MODEL", "llm", "model", default="gpt-4o-mini")
+    llm_model: str = _env_or_yaml(
+        "LAW_API_LLM_MODEL",
+        "llm",
+        "model",
+        default=os.getenv("VLLM_MODEL") or "Qwen/Qwen2.5-1.5B-Instruct",
+    )
     llm_base_url: str = _env_or_yaml("LAW_API_LLM_BASE_URL", "llm", "base_url")
     llm_api_key: str = os.getenv("LAW_API_LLM_API_KEY", "")
     llm_temperature: float = float(_env_or_yaml("LAW_API_LLM_TEMPERATURE", "llm", "temperature", default="0.0"))
@@ -56,22 +68,54 @@ class Settings:
     rag_rerank_candidates: int = int(_env_or_yaml("LAW_API_RERANK_CANDIDATES", "rag", "rerank_candidates", default="10"))
     rag_rerank_max_length: int = int(_env_or_yaml("LAW_API_RERANK_MAX_LENGTH", "rag", "rerank_max_length", default="256"))
     rag_rerank_enabled: bool = _env_or_yaml("LAW_API_RERANK", "rag", "rerank", default="true").lower() not in ("false", "0", "off", "no")
+    preload_models_on_startup: bool = (
+        os.getenv("LAW_API_PRELOAD_MODELS", "false").lower() in ("true", "1", "yes", "on")
+    )
     max_upload_bytes: int = int(_env_or_yaml("LAW_API_MAX_UPLOAD_BYTES", "paths", "max_upload_bytes", default=str(50 * 1024 * 1024)))
     # Evaluation: the generation model is the EVALUATED model (serves /ask);
     # the judge only scores its answers during Ragas evaluation.
-    eval_generation_base_url: str = _env_or_yaml(
-        "LAW_API_EVAL_GENERATION_BASE_URL", "eval", "generation_base_url", default="http://127.0.0.1:8001/v1"
+    # Both default to vLLM for offline GPU stacks and switch seamlessly to any
+    # commercial/hosted provider (openai, gemini, anthropic, claude, openrouter, groq, deepseek, ollama, mock).
+    eval_generation_provider: str = (
+        os.getenv("LAW_API_EVAL_GENERATION_PROVIDER")
+        or _eval_yaml_value("generation_provider", default="vllm")
     )
-    eval_generation_model: str = _env_or_yaml(
-        "LAW_API_EVAL_GENERATION_MODEL", "eval", "generation_model", default="Qwen/Qwen2.5-1.5B-Instruct-AWQ"
+    eval_generation_base_url: str = (
+        os.getenv("LAW_API_EVAL_GENERATION_BASE_URL")
+        or _eval_yaml_value("generation_base_url", default="http://127.0.0.1:8001/v1")
     )
-    # Evaluation (Option A): the judge is the SAME model served by the same
-    # generation vLLM server — a 6 GB GPU cannot host a second engine.
-    eval_judge_base_url: str = _env_or_yaml(
-        "LAW_API_EVAL_JUDGE_BASE_URL", "eval", "judge_base_url", default="http://127.0.0.1:8001/v1"
+    eval_generation_model: str = (
+        os.getenv("LAW_API_EVAL_GENERATION_MODEL")
+        or _eval_yaml_value("generation_model", default="")
+        or os.getenv("VLLM_MODEL")
+        or "Qwen/Qwen2.5-1.5B-Instruct"
     )
-    eval_judge_model: str = _env_or_yaml(
-        "LAW_API_EVAL_JUDGE_MODEL", "eval", "judge_model", default="Qwen/Qwen2.5-1.5B-Instruct"
+    eval_generation_api_key: str = (
+        os.getenv("LAW_API_EVAL_GENERATION_API_KEY")
+        or os.getenv("LAW_API_LLM_API_KEY", "")
+    )
+    # Judge model configuration (supports dedicated provider such as OpenAI/Gemini/Claude).
+    eval_judge_provider: str = (
+        os.getenv("LAW_API_EVAL_JUDGE_PROVIDER")
+        or os.getenv("EVAL_JUDGE_PROVIDER")
+        or _eval_yaml_value("judge_provider", default="vllm")
+    )
+    eval_judge_base_url: str = (
+        os.getenv("LAW_API_EVAL_JUDGE_BASE_URL")
+        or os.getenv("EVAL_JUDGE_BASE_URL")
+        or _eval_yaml_value("judge_base_url", default="http://127.0.0.1:8001/v1")
+    )
+    eval_judge_model: str = (
+        os.getenv("LAW_API_EVAL_JUDGE_MODEL")
+        or os.getenv("EVAL_JUDGE_MODEL")
+        or _eval_yaml_value("judge_model", default="")
+        or os.getenv("VLLM_MODEL")
+        or "Qwen/Qwen2.5-1.5B-Instruct"
+    )
+    eval_judge_api_key: str = (
+        os.getenv("LAW_API_EVAL_JUDGE_API_KEY")
+        or os.getenv("EVAL_JUDGE_API_KEY")
+        or os.getenv("LAW_API_LLM_API_KEY", "")
     )
     langfuse_host: str = _env_or_yaml("LANGFUSE_HOST", "langfuse", "host", default="http://127.0.0.1:3000")
     langfuse_public_key: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
@@ -84,12 +128,8 @@ class Settings:
     # directory, so a bare "data/eval/..." silently pointed at a directory that
     # does not exist and the alert gauges stayed at zero.
     _eval_scores = Path(
-        _env_or_yaml(
-            "LAW_API_EVAL_SCORES_PATH",
-            "eval",
-            "scores_path",
-            default="data/eval/latest_scores.json",
-        )
+        os.getenv("LAW_API_EVAL_SCORES_PATH")
+        or _eval_yaml_value("scores_path", default="data/eval/latest_scores.json")
     )
     eval_scores_path: Path = (
         _eval_scores if _eval_scores.is_absolute() else PROJECT_ROOT / _eval_scores
@@ -98,18 +138,43 @@ class Settings:
     # and republished by the metrics bridge, so the Grafana panels keep their
     # last value across a restart instead of resetting to zero.
     _eval_live = Path(
-        _env_or_yaml(
-            "LAW_API_EVAL_LIVE_SCORES_PATH",
-            "eval",
-            "live_scores_path",
-            default="data/eval/latest_live_eval.json",
-        )
+        os.getenv("LAW_API_EVAL_LIVE_SCORES_PATH")
+        or _eval_yaml_value("live_scores_path", default="data/eval/latest_live_eval.json")
     )
     eval_live_scores_path: Path = (
         _eval_live if _eval_live.is_absolute() else PROJECT_ROOT / _eval_live
     )
     # Keys are project-scoped; when set, tracing is refused if the keys belong to another project.
     langfuse_project_name: str = os.getenv("LANGFUSE_PROJECT_NAME", "")
+
+    # ---- Enterprise SaaS settings ----
+    auth_required: bool = (
+        os.getenv("LAW_API_AUTH_REQUIRED", "false").lower() in ("true", "1", "yes", "on")
+    )
+    jwt_secret_key: str = os.getenv("LAW_API_JWT_SECRET", "dev-only-jwt-secret-change-in-prod")
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = int(os.getenv("LAW_API_JWT_EXPIRE_MINUTES", "1440"))
+    default_tenant_id: str = os.getenv("LAW_API_DEFAULT_TENANT_ID", "org_default")
+    rate_limit_rpm: int = int(os.getenv("LAW_API_RATE_LIMIT_RPM", "120"))
+    hybrid_search_enabled: bool = (
+        _env_or_yaml("LAW_API_HYBRID_SEARCH", "rag", "hybrid_search", default="true").lower()
+        not in ("false", "0", "off", "no")
+    )
+    object_store_provider: str = os.getenv("LAW_API_OBJECT_STORE", "local")
+    s3_endpoint_url: str = os.getenv("S3_ENDPOINT_URL", "")
+    s3_bucket: str = os.getenv("S3_BUCKET", "legal-rag-docs")
+    s3_access_key: str = os.getenv("S3_ACCESS_KEY", "")
+    s3_secret_key: str = os.getenv("S3_SECRET_KEY", "")
+    saas_db_path: Path | None = (
+        Path(os.environ["LAW_API_SAAS_DB_PATH"]) if os.getenv("LAW_API_SAAS_DB_PATH") else None
+    )
+
+    @property
+    def resolved_saas_db_path(self) -> Path:
+        """Resolve SaaS SQLite path relative to upload_dir parent so isolated test dirs stay isolated."""
+        if self.saas_db_path is not None:
+            return self.saas_db_path
+        return self.upload_dir.parent / "saas_state.db"
 
 
 settings = Settings()

@@ -18,6 +18,13 @@ class CrossEncoderReranker(RerankerInterface):
         self.max_length = max_length
         self._model = None
 
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+    async def warmup(self) -> None:
+        await asyncio.to_thread(self._ensure_model)
+
     def _ensure_model(self):
         if self._model is None:
             from sentence_transformers import CrossEncoder

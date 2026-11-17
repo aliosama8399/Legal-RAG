@@ -7,11 +7,13 @@ startup hook — safe under both plain uvicorn and bento.
 """
 
 import asyncio
-from time import perf_counter
 
 from fastapi import FastAPI
 
-from .config import Settings, settings as default_settings
+from .auth.store import TenantStore
+from .config import Settings
+from .config import settings as default_settings
+from .jobs.ingestion_worker import IngestionJobManager
 from .services import DocumentIngestionService, RAGQueryService
 from .stores.embeddings.EmbeddingProviderFactory import EmbeddingProviderFactory
 from .stores.llm.LLMProviderFactory import LLMProviderFactory
@@ -22,20 +24,11 @@ from .tracking.mlflow_tracker import MLflowTracker
 
 
 def _initialized(app: FastAPI) -> bool:
-    # Deliberately a completion flag, not `hasattr(state, "rag_service")`. That
-    # attribute is assigned before the last initialization steps, so a failure
-    # late in the sequence left the app looking ready: the first request 500'd
-    # and every later request skipped initialization entirely (silently
-    # disabling the metrics bridge).
     return getattr(app.state, "rag_ready", False)
 
 
 async def ensure_services(app: FastAPI) -> None:
-    """Initialize stored + shared resources on first use if needed.
-
-    Idempotent and thread/coroutine-safe via a per-app asyncio.Lock so
-    concurrent first requests don't initialize twice.
-    """
+    """Initialize stored + shared resources on first use if needed."""
     if _initialized(app):
         return
     lock = getattr(app.state, "_init_lock", None)
@@ -55,8 +48,10 @@ async def initialize_services(
     """Build and attach providers/services onto app.state."""
     preconfig = preconfig if preconfig is not None else getattr(app.state, "_preconfig", {})
     resolved = settings or preconfig.get("settings") or default_settings
-    started = perf_counter()
 
+    tenant_store = preconfig.get("tenant_store") or TenantStore(
+        resolved.resolved_saas_db_path, default_tenant_id=resolved.default_tenant_id
+    )
     storage = preconfig.get("storage") or VectorDBProviderFactory.create(resolved)
     embedder = preconfig.get("embedder") or EmbeddingProviderFactory.create(resolved.embedding_name)
     llm = preconfig.get("llm") or LLMProviderFactory.create(
@@ -68,12 +63,20 @@ async def initialize_services(
         tracker = MLflowTracker(resolved.mlflow_tracking_uri, resolved.mlflow_experiment)
     reranker = preconfig.get("reranker")
     if reranker is None and resolved.rag_rerank_enabled and resolved.rag_reranker:
-        reranker = RerankerProviderFactory.create(resolved.rag_reranker, resolved.rag_rerank_max_length)
+        reranker = RerankerProviderFactory.create(
+            resolved.rag_reranker, resolved.rag_rerank_max_length
+        )
 
     await storage.connect()
+    if resolved.preload_models_on_startup:
+        if hasattr(embedder, "warmup"):
+            await embedder.warmup()
+        if reranker is not None and hasattr(reranker, "warmup"):
+            await reranker.warmup()
 
     state = app.state
     state.settings = resolved
+    state.tenant_store = tenant_store
     state.storage = storage
     state.embedder = embedder
     state.llm = llm
@@ -85,24 +88,28 @@ async def initialize_services(
         resolved.langfuse_secret_key,
         resolved.langfuse_project_name,
     )
-    state.ingestion_service = DocumentIngestionService(resolved, storage, embedder, tracker)
+    state.ingestion_service = DocumentIngestionService(
+        resolved, storage, embedder, tracker, tenant_store=tenant_store
+    )
+    state.job_manager = IngestionJobManager(state.ingestion_service, tenant_store)
     state.rag_service = RAGQueryService(
-        storage, embedder, llm,
-        resolved.rag_top_k, resolved.llm_temperature, resolved.llm_max_tokens,
+        storage,
+        embedder,
+        llm,
+        resolved.rag_top_k,
+        resolved.llm_temperature,
+        resolved.llm_max_tokens,
         langfuse=state.langfuse_tracker,
         reranker=reranker,
         rerank_candidates=resolved.rag_rerank_candidates,
-        # Live evaluation judges with the same endpoint the batch eval uses, so
-        # there is one judge to reason about rather than two.
         eval_judge_base_url=resolved.eval_judge_base_url,
         eval_judge_model=resolved.eval_judge_model,
-        # Absolute, like the scores path: BentoML's worker CWD is not /app.
+        eval_judge_provider=resolved.eval_judge_provider,
+        eval_judge_api_key=resolved.eval_judge_api_key,
         live_eval_path=str(resolved.eval_live_scores_path),
+        tenant_store=tenant_store,
+        hybrid_search=resolved.hybrid_search_enabled,
     )
-    # Set last: everything above must have succeeded for the app to count as
-    # ready. The Ragas/drift gauges are NOT refreshed here — see
-    # tracking/eval_bridge.py for why a background task cannot survive under
-    # BentoML; /metrics republishes them synchronously on every scrape.
     state.rag_ready = True
 
 
@@ -110,6 +117,9 @@ async def shutdown_services(app: FastAPI) -> None:
     """Release connections — idempotent."""
     if not _initialized(app):
         return
+    job_manager = getattr(app.state, "job_manager", None)
+    if job_manager is not None:
+        await job_manager.shutdown()
     await app.state.storage.disconnect()
     app.state.langfuse_tracker.flush()
     tracker = app.state.tracker

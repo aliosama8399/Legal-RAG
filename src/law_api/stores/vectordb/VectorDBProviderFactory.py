@@ -1,7 +1,7 @@
 from ...helpers.config import Settings
+from .providers import PostgreSQLProvider, QdrantProvider
 from .VectorDBEnum import VectorDBEnum
 from .VectorDBInterface import VectorDBInterface
-from .providers import PostgreSQLProvider, QdrantProvider
 
 
 class VectorDBProviderFactory:

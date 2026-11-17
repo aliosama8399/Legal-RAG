@@ -7,23 +7,30 @@ build/
 dist/
 .venv/
 venv/
-
 # Raw/generated data are tracked by DVC (the .dvc pointer files ARE committed)
 data/raw/*
 !data/raw/*.dvc
 data/corpus/*
 data/processed/*
 data/eval/*
+!data/eval/qa_dataset.jsonl
+!data/eval/evaluation_report.md
+!data/eval/latest_scores.json
+!data/eval/latency_report.md
 src/data/processed/*
 storage/
 mlruns/
 storage/qdrant/
 storage/mlartifacts/
 .dvc/cache/
+.dvc/local_remote/
 
 # Env / secrets
 .env
 *.local
+*.db
+*.db-wal
+*.db-shm
 
 # Tooling
 .mypy_cache/
@@ -43,15 +50,16 @@ artifacts/
 # reports/README.md documents how to reproduce it.
 reports/*
 !reports/README.md
+!reports/locust_report.html
+!reports/locust_report_stats.csv
 
 # OS
 Thumbs.db
 .DS_Store
-.dockerignore
-.gitignore
 .opencode
 # Frontend build artifacts. The image builds these inside Docker; they are not
 # source and node_modules is large.
 frontend/node_modules/
 frontend/dist/
 frontend/tsconfig.tsbuildinfo
+peer_review_Legal-RAG.docx

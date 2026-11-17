@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+# ---------- stage 1: build the eval venv with uv (fast, cached, lockfile-locked) ----------
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS eval-builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# Lockfile-driven dependency sync with eval extra
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev --extra eval
+
+COPY src ./src
+COPY config ./config
+COPY scripts ./scripts
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra eval
+
+# ---------- stage 2: official Apache Airflow runtime with pre-baked eval venv ----------
+FROM apache/airflow:2.10.2-python3.12
+
+USER root
+# Place the eval venv in /opt/eval-venv so it is NEVER shadowed by /opt/airflow volume mounts
+COPY --from=eval-builder /app/.venv /opt/eval-venv
+RUN chown -R airflow:root /opt/eval-venv
+
+USER airflow

@@ -8,14 +8,15 @@ Curated:    data/eval/qa_dataset.jsonl {question, ground_truth_answer, ground_tr
 """
 
 import argparse
+import asyncio
 import json
 import random
 import re
 from pathlib import Path
 
-from openai import OpenAI
-
 from law_api.config import settings
+from law_api.stores.llm.LLMInterface import LLMInterface
+from law_api.stores.llm.LLMProviderFactory import LLMProviderFactory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ARTICLES = PROJECT_ROOT / "src" / "data" / "processed" / "law_articles.jsonl"
@@ -42,13 +43,20 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
             output.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _client(which: str) -> tuple[OpenAI, str]:
-    base_url, model = (
-        (settings.eval_judge_base_url, settings.eval_judge_model)
-        if which == "judge"
-        else (settings.eval_generation_base_url, settings.eval_generation_model)
+def _provider(which: str) -> LLMInterface:
+    if which == "judge":
+        return LLMProviderFactory.create(
+            settings.eval_judge_provider,
+            settings.eval_judge_model,
+            api_key=settings.eval_judge_api_key,
+            base_url=settings.eval_judge_base_url,
+        )
+    return LLMProviderFactory.create(
+        settings.eval_generation_provider,
+        settings.eval_generation_model,
+        api_key=settings.eval_generation_api_key,
+        base_url=settings.eval_generation_base_url,
     )
-    return OpenAI(api_key="not-needed", base_url=base_url), model
 
 
 def _parse_json_items(raw: str) -> list[dict]:
@@ -83,7 +91,7 @@ def generate_questions(
     if not articles:
         raise ValueError(f"No usable articles found at {articles_path} — run prepare_law first")
     sampled = random.sample(articles, min(count, len(articles)))
-    client, model = _client(which)
+    llm = _provider(which)
 
     candidates: list[dict] = []
     for article in sampled:
@@ -95,19 +103,18 @@ def generate_questions(
             'Strict JSON list: [{"question": "...", "answer": "..."}]'
         )
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": GENERATION_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-                max_tokens=1024,
+            raw_reply = asyncio.run(
+                llm.generate(
+                    prompt,
+                    system=GENERATION_SYSTEM,
+                    temperature=0.7,
+                    max_tokens=1024,
+                )
             )
         except Exception as error:
             print(f"article {article['article_number']}: generation failed: {error}")
             continue
-        for item in _parse_json_items(response.choices[0].message.content or ""):
+        for item in _parse_json_items(raw_reply or ""):
             question = str(item.get("question", "")).strip()
             answer = str(item.get("answer", "")).strip()
             if question and answer:

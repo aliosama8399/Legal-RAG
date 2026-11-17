@@ -1,4 +1,4 @@
-﻿# Non-secret provider configuration.
+# Non-secret provider configuration.
 # Override any value with the matching environment variable in .env.
 
 storage:
@@ -15,14 +15,14 @@ embedding:
   name: arabert-all-nli-triplet-matryoshka # gate-arabert-v1, arabert-all-nli-triplet-matryoshka, or bge-m3
 
 mlflow:
-  tracking_uri: http://127.0.0.1:5001
+  tracking_uri: http://127.0.0.1:5000
   experiment: legal-rag-embeddings
 
 llm:
-  provider: ollama # openai, vllm, ollama, or local
-  model: gemma4:31b-cloud   # with ollama this MUST be an ollama model (e.g. llama3.1 â€” see `ollama list`)
-  base_url: "http://127.0.0.1:11434" # ollama: Ollama host; vllm: OpenAI-compatible endpoint (default http://127.0.0.1:8000/v1)
-  temperature: 0.5
+  provider: vllm # openai, gemini, anthropic, claude, openrouter, groq, deepseek, vllm, ollama, local, or mock
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  base_url: "http://127.0.0.1:8001/v1" # openai: "" | gemini/anthropic: native REST | openrouter/groq/deepseek/vllm: OpenAI-compat URL | ollama: http://127.0.0.1:11434
+  temperature: 0.2
   max_tokens: 512
 
 rag:
@@ -39,10 +39,12 @@ paths:
 
 evaluation:
   # The GENERATION model is the model being evaluated; it also serves /ask.
+  generation_provider: vllm # openai, gemini, anthropic, claude, openrouter, groq, deepseek, vllm, ollama, local, or mock
   generation_base_url: http://vllm:8000/v1
   generation_model: Qwen/Qwen2.5-1.5B-Instruct
-  # The judge only scores answers during Ragas evaluation. On a 6 GB GPU it has
-  # to be the same engine as generation: a second vLLM will not fit.
+  # The judge only scores answers during Ragas evaluation and /ask?evaluate=true.
+  # Use e.g. openai/gpt-4o, gemini/gemini-2.5-flash, or claude/claude-3-5-sonnet-latest for frontier judging.
+  judge_provider: vllm # openai, gemini, anthropic, claude, openrouter, groq, deepseek, vllm, ollama, local, or mock
   judge_base_url: http://vllm:8000/v1
   judge_model: Qwen/Qwen2.5-1.5B-Instruct
   # Where the eval job writes the newest Ragas scores. Read (read-only mount) by

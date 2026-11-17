@@ -2,11 +2,10 @@
 # Render the nginx config from the template.
 #
 # CANARY_SPLIT_PERCENT is substituted either way, but nginx REJECTS
-# split_clients at exactly "0%" ("invalid percent value"), so the ordinary
-# "canary off" value of 0 cannot be rendered at all. When the split is 0 every
-# region between the `# --- canary begin/end ---` markers is deleted instead.
-# That is valid, unambiguous, and avoids 502s from an unresolvable canary
-# upstream — which is what a nonzero-but-unreachable split would produce.
+# split_clients at exactly "0%" ("invalid percent value"), so when split is 0
+# every `# --- canary begin/end ---` block is removed and direct keepalive
+# `upstream bento_backend` is used. When canary > 0, `# --- nocanary begin/end ---`
+# is removed so split_clients routes traffic across stable and canary upstreams.
 set -eu
 
 TEMPLATE=/etc/nginx/templates/default.conf.template
@@ -24,7 +23,11 @@ if [ "$CANARY_SPLIT_PERCENT" = "0" ]; then
   ' "$TEMPLATE" > "$WORK"
 else
   echo "frontend: canary enabled at ${CANARY_SPLIT_PERCENT}%"
-  envsubst '$CANARY_SPLIT_PERCENT' < "$TEMPLATE" > "$WORK"
+  awk '
+    /# --- nocanary begin/ { skip = 1; next }
+    /# --- nocanary end/   { skip = 0; next }
+    !skip
+  ' "$TEMPLATE" | envsubst '$CANARY_SPLIT_PERCENT' > "$WORK"
 fi
 
 cp "$WORK" "$OUTPUT"

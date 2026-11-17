@@ -1,6 +1,5 @@
-from .RerankerEnum import RerankerEnum
-from .RerankerInterface import RerankerInterface
 from .providers import CrossEncoderReranker
+from .RerankerInterface import RerankerInterface
 
 RERANKER_MODELS = {
     "bge-reranker-v2-m3": "BAAI/bge-reranker-v2-m3",

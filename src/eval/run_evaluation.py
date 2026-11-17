@@ -22,7 +22,8 @@ from pathlib import Path
 
 from law_api.config import settings
 
-from .chunk_sweep import _configs, run_sweep as run_chunk_sweep
+from .chunk_sweep import _configs
+from .chunk_sweep import run_sweep as run_chunk_sweep
 from .dataset import DATASET_PATH, curate, generate_questions
 from .ragas_eval import METRIC_NAMES, run_ragas_eval
 from .retrieval_eval import evaluate_config
@@ -86,10 +87,12 @@ def _write_report(
         lines += [f"| {name} | {score:.4f} |" for name, score in sorted(ragas_scores.items())]
         lines += [
             "",
-            "Every question above is also a trace in Langfuse (project "
-            f"`{settings.langfuse_project_name or 'Legal RAG'}`) with these scores "
-            "attached to the trace, so a regression can be traced back to the "
-            "exact retrieval and generation that produced it.",
+            (
+                "Every question above is also a trace in Langfuse (project "
+                f"`{settings.langfuse_project_name or 'Legal RAG'}`) with these scores "
+                "attached to the trace, so a regression can be traced back to the "
+                "exact retrieval and generation that produced it."
+            ),
             "",
         ]
 
@@ -199,15 +202,17 @@ def main() -> int:
 
     if not args.skip_ragas:
         print("ragas: evaluating the generation model (judge scores) ...")
-        from .ragas_eval import _run_pipeline
-
         from law_api.config import settings as app_settings
+
+        from .ragas_eval import _run_pipeline
 
         try:
             from .ragas_eval import _langfuse_client
 
             params = {
+                "generation_provider": app_settings.eval_generation_provider,
                 "generation_model": app_settings.eval_generation_model,
+                "judge_provider": app_settings.eval_judge_provider,
                 "judge_model": app_settings.eval_judge_model,
                 "embedding_model": app_settings.embedding_name,
                 "top_k": 5,
@@ -234,6 +239,19 @@ def main() -> int:
         except Exception as error:
             print(f"ragas evaluation failed: {error}")
 
+    if retrieval_results:
+        scores_path = Path(settings.eval_scores_path)
+        if scores_path.is_file():
+            try:
+                payload = json.loads(scores_path.read_text(encoding="utf-8"))
+                for res in retrieval_results:
+                    for k in ("hit_rate@5", "mrr@5", "hybrid_hit_at_5", "hybrid_mrr_at_5"):
+                        if k in res:
+                            payload.setdefault("scores", {})[k] = res[k]
+                scores_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
     report = _write_report(
         retrieval_results,
         chunk_results,
@@ -241,6 +259,7 @@ def main() -> int:
         params={
             "generation_model": "not evaluated" if args.skip_ragas else _generation_label(),
             "judge_model": _judge_label(),
+            "questions": len(dataset),
         },
     )
     print(f"\nreport written to {report}")
@@ -250,13 +269,13 @@ def main() -> int:
 def _generation_label() -> str:
     from law_api.config import settings
 
-    return settings.eval_generation_model
+    return f"{settings.eval_generation_provider}/{settings.eval_generation_model}"
 
 
 def _judge_label() -> str:
     from law_api.config import settings
 
-    return settings.eval_judge_model
+    return f"{settings.eval_judge_provider}/{settings.eval_judge_model}"
 
 
 if __name__ == "__main__":
